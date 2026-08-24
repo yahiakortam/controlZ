@@ -1,31 +1,52 @@
-"""An in-memory stand-in for PyGithub, mirroring the surface ControlZ uses.
+"""An in-memory GitHub, for demos and tests.
 
-Only the attributes and methods `GitHubIntegration` touches are implemented,
-with the same semantics the real API has (issues are looked up live, removing
-an absent label is an error, comments get monotonically increasing ids).
+:class:`InMemoryGitHub` implements the slice of the PyGithub surface that
+:class:`~controlz.integrations.github.GitHubIntegration` touches, with the same
+semantics the real API has: issues are looked up live rather than snapshotted,
+removing a label that is not there is an error, and comments get monotonically
+increasing ids.
+
+Pass one in place of a real client and everything works without credentials::
+
+    from controlz.integrations.github import GitHubIntegration
+    from controlz.integrations.memory import InMemoryGitHub
+
+    github = GitHubIntegration(client=InMemoryGitHub())
+
+This is what the TUI demo and most of the test suite run against.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+__all__ = [
+    "InMemoryComment",
+    "InMemoryGitHub",
+    "InMemoryIssue",
+    "InMemoryLabel",
+    "InMemoryRepo",
+    "InMemoryUser",
+    "SandboxError",
+]
 
-class FakeGithubError(Exception):
-    """Stands in for github.GithubException."""
+
+class SandboxError(Exception):
+    """Stands in for ``github.GithubException``."""
 
 
-class FakeNamed:
+class InMemoryLabel:
     def __init__(self, name: str) -> None:
         self.name = name
 
 
-class FakeUser:
+class InMemoryUser:
     def __init__(self, login: str) -> None:
         self.login = login
 
 
-class FakeComment:
-    def __init__(self, issue: FakeIssue, comment_id: int, body: str) -> None:
+class InMemoryComment:
+    def __init__(self, issue: InMemoryIssue, comment_id: int, body: str) -> None:
         self._issue = issue
         self.id = comment_id
         self.body = body
@@ -37,10 +58,10 @@ class FakeComment:
         self.deleted = True
 
 
-class FakeIssue:
+class InMemoryIssue:
     def __init__(
         self,
-        repo: FakeRepo,
+        repo: InMemoryRepo,
         number: int,
         title: str,
         body: str | None = None,
@@ -52,10 +73,10 @@ class FakeIssue:
         self.title = title
         self.body = body
         self.state = "open"
-        self.labels = [FakeNamed(name) for name in labels or []]
-        self.assignees = [FakeUser(login) for login in assignees or []]
+        self.labels = [InMemoryLabel(name) for name in labels or []]
+        self.assignees = [InMemoryUser(login) for login in assignees or []]
         self.html_url = f"https://github.test/{repo.full_name}/issues/{number}"
-        self.comments: dict[int, FakeComment] = {}
+        self.comments: dict[int, InMemoryComment] = {}
         self.edits: list[dict[str, Any]] = []
 
     @property
@@ -70,38 +91,38 @@ class FakeIssue:
             self.body = kwargs["body"]
         if "state" in kwargs:
             if kwargs["state"] not in ("open", "closed"):
-                raise FakeGithubError(f"invalid state {kwargs['state']!r}")
+                raise SandboxError(f"invalid state {kwargs['state']!r}")
             self.state = kwargs["state"]
         if "labels" in kwargs:
-            self.labels = [FakeNamed(str(name)) for name in kwargs["labels"]]
+            self.labels = [InMemoryLabel(str(name)) for name in kwargs["labels"]]
 
     def add_to_labels(self, *names: str) -> None:
         for name in names:
             if name not in self.label_names:
-                self.labels.append(FakeNamed(str(name)))
+                self.labels.append(InMemoryLabel(str(name)))
 
     def remove_from_labels(self, name: str) -> None:
         if name not in self.label_names:
-            raise FakeGithubError(f"404: label {name!r} is not on issue #{self.number}")
+            raise SandboxError(f"404: label {name!r} is not on issue #{self.number}")
         self.labels = [label for label in self.labels if label.name != name]
 
-    def create_comment(self, body: str) -> FakeComment:
+    def create_comment(self, body: str) -> InMemoryComment:
         comment_id = self._repo.next_comment_id()
-        comment = FakeComment(self, comment_id, body)
+        comment = InMemoryComment(self, comment_id, body)
         self.comments[comment_id] = comment
         return comment
 
-    def get_comment(self, comment_id: int) -> FakeComment:
+    def get_comment(self, comment_id: int) -> InMemoryComment:
         try:
             return self.comments[comment_id]
         except KeyError:
-            raise FakeGithubError(f"404: no comment {comment_id}") from None
+            raise SandboxError(f"404: no comment {comment_id}") from None
 
 
-class FakeRepo:
+class InMemoryRepo:
     def __init__(self, full_name: str) -> None:
         self.full_name = full_name
-        self.issues: dict[int, FakeIssue] = {}
+        self.issues: dict[int, InMemoryIssue] = {}
         self._next_issue = 1
         self._next_comment = 1000
 
@@ -109,10 +130,10 @@ class FakeRepo:
         self._next_comment += 1
         return self._next_comment
 
-    def create_issue(self, **kwargs: Any) -> FakeIssue:
+    def create_issue(self, **kwargs: Any) -> InMemoryIssue:
         number = self._next_issue
         self._next_issue += 1
-        issue = FakeIssue(
+        issue = InMemoryIssue(
             self,
             number,
             title=kwargs["title"],
@@ -123,22 +144,22 @@ class FakeRepo:
         self.issues[number] = issue
         return issue
 
-    def get_issue(self, number: int) -> FakeIssue:
+    def get_issue(self, number: int) -> InMemoryIssue:
         try:
             return self.issues[number]
         except KeyError:
-            raise FakeGithubError(f"404: no issue #{number} in {self.full_name}") from None
+            raise SandboxError(f"404: no issue #{number} in {self.full_name}") from None
 
 
-class FakeGithub:
-    """Root fake client. ``get_repo`` returns a live, mutable repo."""
+class InMemoryGitHub:
+    """Root client. ``get_repo`` returns a live, mutable repo, creating it on demand."""
 
     def __init__(self) -> None:
-        self.repos: dict[str, FakeRepo] = {}
+        self.repos: dict[str, InMemoryRepo] = {}
         self.get_repo_calls: list[str] = []
 
-    def get_repo(self, full_name: str) -> FakeRepo:
+    def get_repo(self, full_name: str) -> InMemoryRepo:
         self.get_repo_calls.append(full_name)
         if full_name not in self.repos:
-            self.repos[full_name] = FakeRepo(full_name)
+            self.repos[full_name] = InMemoryRepo(full_name)
         return self.repos[full_name]

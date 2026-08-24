@@ -9,7 +9,7 @@ import pytest
 from controlz import Action, Operation, Reversibility
 from controlz.integrations import IntegrationError, UnsupportedOperationError
 from controlz.integrations.github import TOKEN_ENV_VAR, GitHubIntegration
-from fakes import FakeGithubError
+from controlz.integrations.memory import SandboxError
 
 
 def op(api_call: str, **args) -> Operation:
@@ -195,7 +195,7 @@ class TestExecute:
             github.execute(op("delete_repository", repo=repo_name))
 
     def test_backend_errors_propagate(self, github, repo_name):
-        with pytest.raises(FakeGithubError):
+        with pytest.raises(SandboxError):
             github.execute(op("close_issue", repo=repo_name, issue_number=999))
 
 

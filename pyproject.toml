@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.7",
     "rich>=13.7",
-    "textual>=0.60",
+    "textual>=1.0",
     "PyGithub>=2.3",
     "PyYAML>=6.0",
 ]
@@ -33,8 +33,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+
+[project.scripts]
+controlz = "controlz.cli:main"
+cz = "controlz.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yahiakortam/controlZ"
@@ -52,13 +57,14 @@ target-version = "py310"
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["controlz", "fakes"]
+known-first-party = ["controlz"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
 markers = [
     "live: talks to a real GitHub repo; needs CONTROLZ_GITHUB_TOKEN and CONTROLZ_TEST_REPO",
 ]

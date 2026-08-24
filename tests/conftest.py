@@ -2,12 +2,12 @@ import pytest
 
 from controlz import Ledger, Tracker
 from controlz.integrations.github import GitHubIntegration
-from fakes import FakeGithub
+from controlz.integrations.memory import InMemoryGitHub
 
 
 @pytest.fixture
-def fake_github() -> FakeGithub:
-    return FakeGithub()
+def fake_github() -> InMemoryGitHub:
+    return InMemoryGitHub()
 
 
 @pytest.fixture

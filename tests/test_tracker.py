@@ -15,7 +15,7 @@ from controlz import (
 )
 from controlz.integrations import Integration, UnsupportedOperationError
 from controlz.integrations.github import GitHubIntegration
-from fakes import FakeGithubError
+from controlz.integrations.memory import SandboxError
 
 
 class TestRegistry:
@@ -140,7 +140,7 @@ class TestTrackedCall:
 
 class TestFailures:
     def test_failed_call_is_recorded_and_reraised(self, tracker, repo_name):
-        with pytest.raises(FakeGithubError):
+        with pytest.raises(SandboxError):
             tracker.call("github", "close_issue", repo=repo_name, issue_number=999)
 
         action = tracker.last_action()
@@ -151,7 +151,7 @@ class TestFailures:
         assert action.reversibility is Reversibility.UNKNOWN
 
     def test_snapshot_failure_is_recorded_by_default(self, tracker, repo_name):
-        with pytest.raises(FakeGithubError):
+        with pytest.raises(SandboxError):
             tracker.call("github", "add_labels", repo=repo_name, issue_number=42, labels=["bug"])
         assert "snapshot failed" in tracker.last_action().state_before["error"]
 
@@ -203,7 +203,7 @@ class TestPersistenceAndRollback:
         assert issue.title == "Original title"
 
     def test_rollback_reports_unknown_classification(self, tracker, repo_name):
-        with pytest.raises(FakeGithubError):
+        with pytest.raises(SandboxError):
             tracker.call("github", "close_issue", repo=repo_name, issue_number=999)
 
         entry = tracker.rollback_action(tracker.last_action())

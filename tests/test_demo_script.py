@@ -13,7 +13,7 @@ import pytest
 
 from controlz import Ledger
 from controlz.integrations.github import TOKEN_ENV_VAR, GitHubIntegration
-from fakes import FakeGithub
+from controlz.integrations.memory import InMemoryGitHub
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "demo_github.py"
 
@@ -30,7 +30,7 @@ def demo():
 @pytest.fixture
 def fake_backed(demo, monkeypatch):
     """Point the script's GitHubIntegration at a fake client."""
-    client = FakeGithub()
+    client = InMemoryGitHub()
     monkeypatch.setenv(TOKEN_ENV_VAR, "fake-token")
     monkeypatch.setattr(demo, "GitHubIntegration", lambda: GitHubIntegration(client=client))
     return client

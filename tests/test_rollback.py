@@ -25,7 +25,7 @@ from controlz import (
     dependency_order,
 )
 from controlz.integrations import Integration
-from fakes import FakeGithubError
+from controlz.integrations.memory import SandboxError
 
 
 class TestDependencyOrder:
@@ -420,7 +420,7 @@ class TestHonesty:
         tracker.call("github", "close_issue", repo=repo_name, issue_number=issue.number)
 
         def explode(action):
-            raise FakeGithubError("502 upstream is unhappy")
+            raise SandboxError("502 upstream is unhappy")
 
         monkeypatch.setattr(tracker.integration_for("github"), "execute_rollback", explode)
         report = tracker.rollback()
@@ -572,7 +572,7 @@ class TestStopOnError:
 
         def explode(action):
             if action.api_call == "close_issue":
-                raise FakeGithubError("boom")
+                raise SandboxError("boom")
             return original(action)
 
         integration.execute_rollback = explode

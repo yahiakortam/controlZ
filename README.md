@@ -8,13 +8,62 @@ a few cannot be undone at all. ControlZ records what an agent did, classifies ho
 reversible each step was, and keeps the plan for undoing it.
 
 > **Status: early.** The data model, the durable ledger, the interception layer,
-> the GitHub integration, conflict-aware rollback, and the pre-execution policy
-> gate are here and tested. The TUI is not.
+> the GitHub integration, conflict-aware rollback, the pre-execution policy gate,
+> and the watch window are here and tested.
 
 ## Install
 
 ```bash
 pip install -e ".[dev]"
+```
+
+## The watch window
+
+```bash
+pip install -e .
+cz watch --demo          # the chaos agent, in memory, no credentials needed
+```
+
+![the live action feed](docs/tui-feed.png)
+
+Actions stream in as the agent works. Colour means one thing and only one thing
+— **green reversible, amber compensatable, red irreversible, grey unknown** —
+and it is the same colour in the feed, the diff, and the footer.
+
+Select a row and the right pane shows exactly what that action changed: the
+fields it touched, `-` for what was there and `+` for what replaced it, with the
+agent's stated intent and the plan for undoing it. Fields it did not touch stay
+dim, so the eye lands on what moved.
+
+Press **`R`** and the session comes undone, one row at a time:
+
+![the rewind](docs/tui-rewind.png)
+
+Thirteen rows strike through as `↺ restored`. The redundant label change reports
+`no-op` — it changed nothing, so there was nothing to undo, and claiming
+otherwise would be a lie. The wire transfer is `skipped` in red, and the footer
+says the quiet part out loud: **not everything came back**.
+
+| key | |
+| --- | --- |
+| `↑` `↓` / `j` `k` | select an action |
+| `r` | rewind the selected action |
+| `R` | rewind the whole session |
+| `q` | quit |
+
+Point it at a real run instead, and it follows the ledger file as the agent
+writes to it:
+
+```bash
+export CONTROLZ_GITHUB_TOKEN=ghp_...
+cz watch run.json
+```
+
+### Other commands
+
+```bash
+cz score run.json       # blast-radius readout for a recorded session
+cz rollback run.json    # rewind from the terminal, with --dry-run and --force
 ```
 
 ## Quick start
@@ -85,6 +134,7 @@ for action in reloaded.session.undo_order():
 | `Ledger` | Appends actions to a session and persists it to a JSON file (atomically), then reloads it. |
 | `Integration` | The abstract backend: `snapshot`, `classify`, `build_rollback_plan`, `execute_rollback` — plus `execute`, so the tracker can wrap a call rather than merely observe one. |
 | `Tracker` | The interception layer: snapshot → execute → snapshot → classify → plan → record. |
+| `ControlZApp` | The watch window: live feed, before/after diff, and the rewind. |
 | `ReversibilityScore` / `BlastRadius` | Pre-execution scoring: weighted coverage, plus what the plan touches. |
 | `Policy` / `PolicyGate` | Rules in YAML or a dict, turned into allow / require approval / block. |
 | `RollbackReport` | Per-action account of a rollback: restored, skipped, conflicts, failures. |
@@ -276,6 +326,10 @@ pytest                  # unit tests; live GitHub tests skip themselves
 ruff check .            # lint
 ruff format .           # format
 ```
+
+`controlz.integrations.memory.InMemoryGitHub` is a working in-memory GitHub —
+pass it to `GitHubIntegration(client=...)` and everything runs with no
+credentials. The TUI demo and most of the test suite use it.
 
 The live integration tests run against a real repository and are skipped unless
 both variables are set:
