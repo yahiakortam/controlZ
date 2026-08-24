@@ -23,6 +23,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Footer, Static
 
 from controlz.ledger import Ledger
@@ -126,6 +127,7 @@ class ControlZApp(App[None]):
         self._report: RollbackReport | None = None
         self._mtime: float | None = None
         self._rewinding = False
+        self._panes_ready = False
 
     # -- layout -------------------------------------------------------------
 
@@ -155,6 +157,22 @@ class ControlZApp(App[None]):
     # -- state --------------------------------------------------------------
 
     @property
+    def _live(self) -> bool:
+        """True only while the panes actually exist.
+
+        False before compose finishes and again during shutdown, when queued
+        messages are still being dispatched against a screen that is already
+        being torn down.
+        """
+        if not self._panes_ready:
+            return False
+        try:
+            self.query_one("#feed", ActionFeed)
+        except NoMatches:
+            return False
+        return True
+
+    @property
     def session(self) -> Session:
         return self.tracker.ledger.session
 
@@ -170,9 +188,16 @@ class ControlZApp(App[None]):
     def status(self) -> BlastRadiusBar:
         return self.query_one("#status", BlastRadiusBar)
 
-    def on_mount(self) -> None:
+    def on_ready(self) -> None:
+        """Start polling only once the panes exist.
+
+        Everything here touches children, so it cannot run at mount time: the
+        poll timer would otherwise race compose and query a feed that is not
+        there yet.
+        """
         self.query_one("#status", BlastRadiusBar).border_title = "blast radius"
         self.diff.show(None)
+        self._panes_ready = True
         self.refresh_status()
         self.sync()
         self.set_interval(self.poll_interval, self.sync)
@@ -183,6 +208,8 @@ class ControlZApp(App[None]):
 
     def sync(self) -> None:
         """Pull in anything new: from the ledger file, or from the running agent."""
+        if not self._live:
+            return
         if self.ledger_path is not None:
             self._reload_file()
         new = [a for a in self.session.actions if a.operation_id not in self._shown]
@@ -216,11 +243,14 @@ class ControlZApp(App[None]):
         integration = self.tracker.integration_for("github")
         issues = seed_repo(integration.client)
         for _ in run_chaos_agent(self.tracker, issues, delay=self.demo_delay):
-            pass
+            if not self.is_running:
+                return
 
     # -- selection ----------------------------------------------------------
 
     def show_selected(self) -> None:
+        if not self._live:
+            return
         action = self.feed.selected_action
         entry = self._entries.get(action.operation_id) if action else None
         self.diff.show(action, entry)
@@ -236,6 +266,8 @@ class ControlZApp(App[None]):
         self.show_selected()
 
     def refresh_status(self) -> None:
+        if not self._live:
+            return
         score = reversibility_score(self.session.actions, list(self.tracker._integrations.values()))
         self.status.show(score, self._report)
 
