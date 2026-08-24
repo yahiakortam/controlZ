@@ -14,19 +14,32 @@ from controlz.models import (
     RollbackStep,
     Session,
 )
+from controlz.rollback import (
+    ConflictDetail,
+    RollbackEngine,
+    RollbackEntry,
+    RollbackOutcome,
+    RollbackReport,
+    dependency_order,
+)
 from controlz.tracker import ToolProxy, TrackedCall, Tracker, TrackingError
 
 __version__ = "0.1.0"
 
 __all__ = [
     "Action",
+    "ConflictDetail",
     "Integration",
     "IntegrationError",
     "Ledger",
     "LedgerError",
     "Operation",
     "Reversibility",
+    "RollbackEngine",
+    "RollbackEntry",
+    "RollbackOutcome",
     "RollbackPlan",
+    "RollbackReport",
     "RollbackStep",
     "Session",
     "ToolProxy",
@@ -34,4 +47,5 @@ __all__ = [
     "Tracker",
     "TrackingError",
     "UnsupportedOperationError",
+    "dependency_order",
 ]

@@ -20,6 +20,7 @@ from typing import Any
 from controlz.integrations import Integration, UnsupportedOperationError
 from controlz.ledger import Ledger
 from controlz.models import Action, Operation, Reversibility
+from controlz.rollback import RollbackEngine, RollbackReport
 
 __all__ = ["ToolProxy", "TrackedCall", "Tracker", "TrackingError"]
 
@@ -217,35 +218,24 @@ class Tracker:
 
     # -- undo ---------------------------------------------------------------
 
-    def rollback(self, action: Action) -> None:
-        """Execute one action's rollback plan through its integration."""
-        integration = self.integration_for(action.tool)
-        if not action.reversibility.is_undoable:
-            raise TrackingError(
-                f"action {action.operation_id} is classified "
-                f"{action.reversibility.value}; refusing to roll it back automatically"
-            )
-        integration.execute_rollback(action)
+    @property
+    def engine(self) -> RollbackEngine:
+        """A rollback engine over this tracker's session and integrations."""
+        return RollbackEngine(self.ledger.session, list(self._integrations.values()))
 
-    def rollback_session(self, *, stop_on_error: bool = True) -> list[Action]:
-        """Roll back every undoable action in the session, newest first.
+    def rollback_action(self, action: Action, *, force: bool = False, **kwargs: Any):
+        """Roll back one action and return its :class:`RollbackEntry`.
 
-        Returns the actions that were successfully rolled back. Actions with no
-        executable plan (no-ops) are skipped rather than treated as failures.
+        ``force=True`` is the explicit confirmation a conflict requires.
         """
-        undone: list[Action] = []
-        for action in self.ledger.session.undo_order():
-            plan = action.rollback_plan
-            if not action.reversibility.is_undoable or plan is None or not plan.is_executable:
-                continue
-            try:
-                self.rollback(action)
-            except Exception:
-                if stop_on_error:
-                    raise
-                continue
-            undone.append(action)
-        return undone
+        return self.engine.rollback_action(action, force=force, **kwargs)
+
+    def rollback(self, **kwargs: Any) -> RollbackReport:
+        """Roll the whole session back, newest first, and report on every action.
+
+        Takes the same arguments as :meth:`RollbackEngine.run`.
+        """
+        return self.engine.run(**kwargs)
 
 
 class ToolProxy:

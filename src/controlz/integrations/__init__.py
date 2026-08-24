@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
 from controlz.models import Action, Operation, Reversibility, RollbackPlan
+from controlz.rollback import ConflictDetail
 
 __all__ = ["Integration", "IntegrationError", "UnsupportedOperationError"]
 
@@ -98,6 +99,63 @@ class Integration(ABC):
         Not part of the undo contract, but required for the tracker to wrap an
         operation rather than merely observe one.
         """
+
+    # -- conflict detection -------------------------------------------------
+
+    def current_state(self, action: Action) -> dict[str, Any] | None:
+        """Re-read the live state of whatever ``action`` touched.
+
+        Shaped like the action's ``state_after``, so the two can be compared.
+        The default rebuilds the original operation and snapshots it again,
+        which is correct whenever the arguments identify the target; creates
+        override it to look the identifier up in ``state_after``.
+        """
+        return self.snapshot(
+            Operation(tool=action.tool, api_call=action.api_call, args=action.args)
+        )
+
+    def check_conflict(self, action: Action) -> list[ConflictDetail]:
+        """Report how the live state has drifted from what was recorded.
+
+        Called immediately before a rollback runs. An empty list means it is
+        safe to proceed; anything else stops the rollback until a human
+        confirms. Being unable to read the current state counts as drift — an
+        unreadable target is not a green light.
+
+        The default compares the whole of ``state_after`` against the live
+        state. Integrations should narrow that to the fields the action
+        actually changed, so that an unrelated edit by someone else does not
+        block a rollback that would not have touched it.
+        """
+        try:
+            current = self.current_state(action)
+        except Exception as exc:
+            return [
+                ConflictDetail(
+                    field="<state>",
+                    expected="readable state",
+                    actual=None,
+                    detail=f"could not read the current state: {exc}",
+                )
+            ]
+        if current == action.state_after:
+            return []
+        return [
+            ConflictDetail(
+                field="<state>",
+                expected=action.state_after,
+                actual=current,
+                detail="the recorded state and the live state differ",
+            )
+        ]
+
+    def execute_rollback_plan(self, action: Action) -> None:
+        """Run each step of an action's plan through :meth:`execute`."""
+        plan = action.rollback_plan
+        if plan is None:
+            raise IntegrationError(f"no rollback plan on action {action.operation_id}")
+        for step in plan.steps:
+            self.execute(Operation(tool=step.tool, api_call=step.api_call, args=step.args))
 
     # -- optional hooks -----------------------------------------------------
 

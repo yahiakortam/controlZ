@@ -4,7 +4,15 @@ from typing import ClassVar
 
 import pytest
 
-from controlz import Ledger, Operation, Reversibility, Session, Tracker, TrackingError
+from controlz import (
+    Ledger,
+    Operation,
+    Reversibility,
+    RollbackOutcome,
+    Session,
+    Tracker,
+    TrackingError,
+)
 from controlz.integrations import Integration, UnsupportedOperationError
 from controlz.integrations.github import GitHubIntegration
 from fakes import FakeGithubError
@@ -184,22 +192,25 @@ class TestPersistenceAndRollback:
         assert reloaded.session == tracker.ledger.session
         assert reloaded.actions[0].rollback_plan.steps[0].args["labels"] == ["bug"]
 
-    def test_rollback_undoes_a_tracked_call(self, tracker, issue, repo_name):
+    def test_rollback_action_undoes_a_tracked_call(self, tracker, issue, repo_name):
         tracker.call(
             "github", "update_issue", repo=repo_name, issue_number=issue.number, title="New"
         )
         assert issue.title == "New"
 
-        tracker.rollback(tracker.last_action())
+        entry = tracker.rollback_action(tracker.last_action())
+        assert entry.outcome is RollbackOutcome.RESTORED
         assert issue.title == "Original title"
 
-    def test_rollback_refuses_unknown_classification(self, tracker, repo_name):
+    def test_rollback_reports_unknown_classification(self, tracker, repo_name):
         with pytest.raises(FakeGithubError):
             tracker.call("github", "close_issue", repo=repo_name, issue_number=999)
-        with pytest.raises(TrackingError, match="refusing to roll it back"):
-            tracker.rollback(tracker.last_action())
 
-    def test_rollback_session_unwinds_newest_first(self, tracker, issue, repo_name):
+        entry = tracker.rollback_action(tracker.last_action())
+        assert entry.outcome is RollbackOutcome.SKIPPED
+        assert "unknown" in entry.reason
+
+    def test_rollback_unwinds_the_session_newest_first(self, tracker, issue, repo_name):
         tracker.call(
             "github", "add_labels", repo=repo_name, issue_number=issue.number, labels=["bug"]
         )
@@ -212,20 +223,29 @@ class TestPersistenceAndRollback:
             body="Closing this.",
         )
 
-        undone = tracker.rollback_session()
+        report = tracker.rollback()
 
-        assert [a.api_call for a in undone] == ["create_comment", "close_issue", "add_labels"]
+        assert [e.api_call for e in report.restored] == [
+            "create_comment",
+            "close_issue",
+            "add_labels",
+        ]
+        assert report.complete
         assert issue.state == "open"
         assert issue.label_names == ["triage"]
         assert comment.id not in issue.comments
 
-    def test_rollback_session_skips_no_ops(self, tracker, issue, repo_name):
+    def test_no_op_actions_are_not_claimed_as_restored(self, tracker, issue, repo_name):
         tracker.call(
             "github", "add_labels", repo=repo_name, issue_number=issue.number, labels=["triage"]
-        )  # already present
-        assert tracker.rollback_session() == []
+        )
+        report = tracker.rollback()
 
-    def test_rollback_session_can_continue_past_errors(self, tracker, issue, repo_name):
+        assert report.restored == []
+        assert len(report.nothing_to_do) == 1
+        assert report.complete
+
+    def test_rollback_continues_past_a_failure(self, tracker, issue, repo_name):
         tracker.call("github", "close_issue", repo=repo_name, issue_number=issue.number)
         tracker.call(
             "github", "create_comment", repo=repo_name, issue_number=issue.number, body="hi"
@@ -233,8 +253,10 @@ class TestPersistenceAndRollback:
         # Someone else deleted the comment in the meantime.
         issue.comments.clear()
 
-        undone = tracker.rollback_session(stop_on_error=False)
-        assert [a.api_call for a in undone] == ["close_issue"]
+        report = tracker.rollback()
+
+        assert [e.api_call for e in report.restored] == ["close_issue"]
+        assert [e.api_call for e in report.conflicts] == ["create_comment"]
         assert issue.state == "open"
 
 
@@ -286,7 +308,8 @@ class TestWithAnotherIntegration:
         tracker.call("memory", "set", key="greeting", value="goodbye")
         assert memory.store["greeting"] == "goodbye"
 
-        tracker.rollback(tracker.last_action())
+        entry = tracker.rollback_action(tracker.last_action())
+        assert entry.outcome is RollbackOutcome.RESTORED
         assert memory.store["greeting"] == "hello"
 
 

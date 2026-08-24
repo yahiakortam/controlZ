@@ -93,3 +93,9 @@ class TestDemoRun:
         assert issue.label_names == []
         # The issue stays closed: closing is the compensation for creating it.
         assert issue.state == "closed"
+
+    def test_rollback_reports_every_action(self, demo, fake_backed, tmp_path, capsys):
+        demo.main(["--repo", "acme/widgets", "--ledger", str(tmp_path / "demo.json"), "--rollback"])
+        out = capsys.readouterr().out
+        assert "Rollback report" in out
+        assert "4 of 4 actions restored" in out

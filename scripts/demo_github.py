@@ -23,7 +23,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from controlz import Ledger, Operation, Session, Tracker
+from controlz import Ledger, Operation, RollbackReport, Session, Tracker
 from controlz.integrations.github import TOKEN_ENV_VAR, GitHubIntegration
 
 console = Console()
@@ -79,6 +79,38 @@ def render_session(session: Session) -> None:
             rollback,
         )
     console.print(table)
+
+
+OUTCOME_STYLE = {
+    "restored": "green",
+    "nothing_to_do": "dim",
+    "planned": "cyan",
+    "skipped": "yellow",
+    "conflict": "magenta",
+    "blocked": "yellow",
+    "failed": "red",
+    "not_attempted": "dim",
+}
+
+
+def render_report(report: RollbackReport) -> None:
+    """Print every action's fate — including the ones that did not come back."""
+    table = Table(title="Rollback report", expand=True)
+    table.add_column("api_call")
+    table.add_column("outcome")
+    table.add_column("why")
+
+    for entry in report.entries:
+        style = OUTCOME_STYLE.get(entry.outcome.value, "white")
+        table.add_row(entry.api_call, f"[{style}]{entry.outcome.value}[/{style}]", entry.reason)
+    console.print(table)
+
+    verdict = "green" if report.complete else "yellow"
+    console.print(
+        f"[{verdict}]{len(report.restored)} of {len(report.entries)} actions restored[/{verdict}]"
+    )
+    if not report.complete:
+        console.print("[yellow]some actions need attention — see the table above[/yellow]")
 
 
 def summarize(state: dict | None) -> str:
@@ -181,11 +213,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.rollback:
         console.rule("[bold]Rolling back[/bold]")
-        undone = tracker.rollback_session(stop_on_error=False)
-        for action in undone:
-            console.print(f"undid {action.api_call} ({action.rollback_plan.strategy})")
-        console.print(f"[green]rolled back {len(undone)} of {len(tracker.ledger)} actions[/green]")
-        console.print("[dim]the issue itself stays closed — GitHub cannot delete issues[/dim]")
+        render_report(tracker.rollback())
+        console.print(
+            "[dim]the issue itself stays closed — closing is the compensation for "
+            "creating it, not an undo[/dim]"
+        )
 
     return 0
 

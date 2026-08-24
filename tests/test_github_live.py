@@ -16,7 +16,13 @@ import uuid
 
 import pytest
 
-from controlz import Ledger, Operation, Reversibility, Session, Tracker
+from controlz import (
+    Ledger,
+    Operation,
+    Reversibility,
+    Session,
+    Tracker,
+)
 from controlz.integrations.github import GitHubIntegration
 
 pytestmark = pytest.mark.live
@@ -185,3 +191,192 @@ class TestLiveTracking:
         replay = Tracker(reloaded, [tracker.integration_for("github")])
         undone = replay.rollback_session()
         assert [a.api_call for a in undone] == ["close_issue", "add_labels"]
+
+
+class TestLiveRollback:
+    """Phase 2 against a real repo: ordering, conflicts, and honesty."""
+
+    def test_session_rollback_restores_everything(self, tracker, integration, issue_number):
+        repo = integration.client.get_repo(REPO)
+        before = repo.get_issue(issue_number)
+        original = {
+            "title": before.title,
+            "body": before.body,
+            "state": before.state,
+            "labels": sorted(label.name for label in before.labels),
+        }
+
+        gh = tracker.tool("github")
+        gh.update_issue(repo=REPO, issue_number=issue_number, title="[controlz] WRONG title")
+        gh.add_labels(repo=REPO, issue_number=issue_number, labels=["controlz-temp"])
+        gh.create_comment(repo=REPO, issue_number=issue_number, body="Wrong comment.")
+        gh.close_issue(repo=REPO, issue_number=issue_number)
+
+        report = tracker.ledger.session.rollback(integration)
+
+        assert report.fully_restored, report.summary()
+        assert len(report.restored) == 4
+
+        after = integration.client.get_repo(REPO).get_issue(issue_number)
+        assert {
+            "title": after.title,
+            "body": after.body,
+            "state": after.state,
+            "labels": sorted(label.name for label in after.labels),
+        } == original
+        assert [c for c in after.get_comments()] == []
+
+    def test_external_edit_is_refused_and_flagged(self, tracker, integration, issue_number):
+        original_title = integration.client.get_repo(REPO).get_issue(issue_number).title
+        tracker.call(
+            "github",
+            "update_issue",
+            repo=REPO,
+            issue_number=issue_number,
+            title="[controlz] agent title",
+        )
+        # A human edits the very field the rollback would restore.
+        human_title = f"[controlz] a human was here {uuid.uuid4().hex[:6]}"
+        integration.client.get_repo(REPO).get_issue(issue_number).edit(title=human_title)
+
+        report = tracker.rollback()
+
+        assert len(report.conflicts) == 1
+        assert report.conflicts[0].conflicts[0].field == "issue.title"
+        assert not report.complete
+        # The human's edit survived.
+        assert integration.client.get_repo(REPO).get_issue(issue_number).title == human_title
+
+        # And it can still be overridden, explicitly — restoring the title the
+        # ledger recorded, which is what makes the refusal a choice, not a wall.
+        forced = tracker.rollback(on_conflict=lambda action, conflicts: True)
+        assert len(forced.restored) == 1
+        assert "overridden by explicit confirmation" in forced.restored[0].reason
+        assert integration.client.get_repo(REPO).get_issue(issue_number).title == original_title
+
+    def test_unrelated_edit_does_not_block_a_rollback(self, tracker, integration, issue_number):
+        tracker.call(
+            "github",
+            "add_labels",
+            repo=REPO,
+            issue_number=issue_number,
+            labels=["controlz-temp"],
+        )
+        # Someone edits a field this action never touched.
+        marker = f"[controlz] renamed {uuid.uuid4().hex[:6]}"
+        integration.client.get_repo(REPO).get_issue(issue_number).edit(title=marker)
+
+        report = tracker.rollback()
+
+        assert report.fully_restored, report.summary()
+        issue = integration.client.get_repo(REPO).get_issue(issue_number)
+        assert "controlz-temp" not in [label.name for label in issue.labels]
+        assert issue.title == marker  # left alone
+
+    def test_irreversible_is_reported_never_claimed(self, tracker, integration, issue_number):
+        tracker.call("github", "close_issue", repo=REPO, issue_number=issue_number)
+        tracker.ledger.session.record(
+            tool="github",
+            api_call="wire_transfer",
+            args={"amount": 5000},
+            reversibility=Reversibility.IRREVERSIBLE,
+            state_after={"sent": True},
+        )
+
+        report = tracker.rollback()
+
+        assert len(report.restored) == 1
+        assert len(report.skipped_irreversible) == 1
+        assert "irreversible" in report.skipped_irreversible[0].reason
+        assert not report.fully_restored
+        assert "not undoable: wire_transfer" in report.summary()
+
+    def test_dry_run_changes_nothing(self, tracker, integration, issue_number):
+        tracker.call("github", "close_issue", repo=REPO, issue_number=issue_number)
+
+        report = tracker.rollback(dry_run=True)
+
+        assert len(report.planned) == 1
+        assert report.restored == []
+        assert integration.client.get_repo(REPO).get_issue(issue_number).state == "closed"
+
+    def test_reverse_dependency_order_live(self, tracker, integration):
+        """A comment on an issue we created is deleted before the issue is closed."""
+        created = tracker.call(
+            "github",
+            "create_issue",
+            repo=REPO,
+            title=f"[controlz] ordering {uuid.uuid4().hex[:8]}",
+            body="Created by the ControlZ live test suite.",
+        )
+        parent_id = tracker.last_action().operation_id
+        try:
+            tracker.track(
+                Operation(
+                    tool="github",
+                    api_call="create_comment",
+                    args={"repo": REPO, "issue_number": created.number, "body": "child"},
+                ),
+                dependencies=[parent_id],
+            )
+
+            report = tracker.rollback()
+
+            assert [e.api_call for e in report.entries] == ["create_comment", "create_issue"]
+            assert report.fully_restored, report.summary()
+
+            issue = integration.client.get_repo(REPO).get_issue(created.number)
+            assert issue.state == "closed"
+            assert list(issue.get_comments()) == []
+        finally:
+            integration.execute(
+                Operation(
+                    tool="github",
+                    api_call="close_issue",
+                    args={"repo": REPO, "issue_number": created.number},
+                )
+            )
+
+    def test_full_session_chaos(self, tracker, integration, issue_number):
+        """Many wrong changes, one rollback, an honest report."""
+        repo = integration.client.get_repo(REPO)
+        before = repo.get_issue(issue_number)
+        original = {
+            "title": before.title,
+            "body": before.body,
+            "labels": sorted(label.name for label in before.labels),
+        }
+
+        gh = tracker.tool("github")
+        gh.update_issue(repo=REPO, issue_number=issue_number, title="[controlz] WRONG 1")
+        gh.update_issue(repo=REPO, issue_number=issue_number, body="WRONG body")
+        gh.add_labels(repo=REPO, issue_number=issue_number, labels=["controlz-temp"])
+        gh.add_labels(repo=REPO, issue_number=issue_number, labels=[LABEL])  # no-op
+        gh.create_comment(repo=REPO, issue_number=issue_number, body="spam 1")
+        gh.create_comment(repo=REPO, issue_number=issue_number, body="spam 2")
+        gh.close_issue(repo=REPO, issue_number=issue_number)
+        gh.reopen_issue(repo=REPO, issue_number=issue_number)
+        tracker.ledger.session.record(
+            tool="github",
+            api_call="wire_transfer",
+            args={"amount": 5000},
+            reversibility=Reversibility.IRREVERSIBLE,
+            state_after={"sent": True},
+        )
+
+        report = tracker.rollback()
+
+        assert len(report.entries) == 9
+        assert len(report.restored) == 7
+        assert len(report.nothing_to_do) == 1
+        assert len(report.skipped_irreversible) == 1
+        assert report.conflicts == []
+        assert report.failures == []
+        assert report.complete
+        assert not report.fully_restored
+
+        after = integration.client.get_repo(REPO).get_issue(issue_number)
+        assert after.title == original["title"]
+        assert after.body == original["body"]
+        assert sorted(label.name for label in after.labels) == original["labels"]
+        assert list(after.get_comments()) == []

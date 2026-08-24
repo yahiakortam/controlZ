@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from controlz.integrations import Integration, IntegrationError
 from controlz.models import Action, Operation, Reversibility, RollbackPlan, RollbackStep
+from controlz.rollback import ConflictDetail
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from github import Github
@@ -242,6 +243,210 @@ class GitHubIntegration(Integration):
         comment = self._issue(args).get_comment(int(self._require(args, "comment_id")))
         comment.delete()
         return comment
+
+    # -- conflict detection -------------------------------------------------
+
+    def current_state(self, action: Action) -> dict[str, Any] | None:
+        """Re-read the issue or comment this action touched.
+
+        Identifiers come from ``state_after`` (falling back to the arguments),
+        so this works for creates, where the target did not exist beforehand.
+        A target that has since vanished reads back as ``None`` rather than
+        raising, so the caller can tell "gone" from "unreachable".
+        """
+        after = action.state_after or {}
+        before = action.state_before or {}
+        repo = after.get("repo") or before.get("repo") or action.args.get("repo")
+
+        if action.api_call in ("create_comment", "delete_comment"):
+            recorded = after.get("comment") or before.get("comment") or {}
+            issue_number = after.get("issue_number") or before.get("issue_number")
+            comment_id = recorded.get("comment_id") or action.args.get("comment_id")
+            state: dict[str, Any] = {
+                "repo": repo,
+                "issue_number": issue_number,
+                "comment": None,
+            }
+            if comment_id is None:
+                return state
+            try:
+                comment = self._issue({"repo": repo, "issue_number": issue_number}).get_comment(
+                    int(comment_id)
+                )
+            except Exception:
+                return state  # deleted, or never there
+            state["comment"] = self._comment_state(comment)
+            return state
+
+        recorded_issue = after.get("issue") or before.get("issue") or {}
+        issue_number = recorded_issue.get("issue_number") or action.args.get("issue_number")
+        if issue_number is None:
+            return {"repo": repo, "issue": None}
+        try:
+            issue = self._issue({"repo": repo, "issue_number": issue_number})
+        except Exception:
+            return {"repo": repo, "issue": None}
+        return {"repo": repo, "issue": self._issue_state(issue)}
+
+    def check_conflict(self, action: Action) -> list[ConflictDetail]:
+        """Compare only the fields this action actually changed.
+
+        A rollback overwrites what the action wrote, and nothing else — so an
+        unrelated edit by someone else must not block it, while an edit to the
+        very field being restored must. Anything unreadable is drift too.
+        """
+        if action.tool != self.name or not self.supports(action.api_call):
+            return []
+        try:
+            current = self.current_state(action)
+        except Exception as exc:
+            return [
+                ConflictDetail(
+                    field="<state>",
+                    detail=f"could not read the current state: {exc}",
+                    expected="readable state",
+                )
+            ]
+
+        checker = getattr(self, f"_conflicts_{action.api_call}")
+        return checker(action, current or {})
+
+    def _conflicts_create_issue(self, action: Action, current: dict) -> list[ConflictDetail]:
+        # Rolling this back only closes the issue; edits others made to it are
+        # none of our business. All that matters is that it still exists.
+        if current.get("issue") is None:
+            recorded = (action.state_after or {}).get("issue") or {}
+            return [
+                ConflictDetail(
+                    field="issue",
+                    expected=f"issue #{recorded.get('issue_number')} exists",
+                    actual=None,
+                    detail="the issue is gone or unreadable",
+                )
+            ]
+        return []
+
+    def _conflicts_create_comment(self, action: Action, current: dict) -> list[ConflictDetail]:
+        recorded = (action.state_after or {}).get("comment") or {}
+        live = current.get("comment")
+        if live is None:
+            return [
+                ConflictDetail(
+                    field="comment",
+                    expected=f"comment {recorded.get('comment_id')} exists",
+                    actual=None,
+                    detail="the comment is already gone",
+                )
+            ]
+        if live.get("body") != recorded.get("body"):
+            return [
+                ConflictDetail(
+                    field="comment.body",
+                    expected=recorded.get("body"),
+                    actual=live.get("body"),
+                    detail="the comment was edited after we posted it",
+                )
+            ]
+        return []
+
+    def _conflicts_delete_comment(self, action: Action, current: dict) -> list[ConflictDetail]:
+        # The comment is gone by definition; re-posting it overwrites nothing.
+        return []
+
+    def _conflicts_update_issue(self, action: Action, current: dict) -> list[ConflictDetail]:
+        issue = current.get("issue")
+        if issue is None:
+            return [self._missing_issue(action)]
+        recorded = (action.state_after or {}).get("issue") or {}
+        conflicts = []
+        for field in _EDITABLE_FIELDS:
+            if field not in action.args:
+                continue
+            if issue.get(field) != recorded.get(field):
+                conflicts.append(
+                    ConflictDetail(
+                        field=f"issue.{field}",
+                        expected=recorded.get(field),
+                        actual=issue.get(field),
+                        detail=f"{field} changed after this action ran",
+                    )
+                )
+        return conflicts
+
+    def _conflicts_close_issue(self, action: Action, current: dict) -> list[ConflictDetail]:
+        return self._conflicts_state(action, current)
+
+    def _conflicts_reopen_issue(self, action: Action, current: dict) -> list[ConflictDetail]:
+        return self._conflicts_state(action, current)
+
+    def _conflicts_state(self, action: Action, current: dict) -> list[ConflictDetail]:
+        issue = current.get("issue")
+        if issue is None:
+            return [self._missing_issue(action)]
+        recorded = (action.state_after or {}).get("issue") or {}
+        if issue.get("state") != recorded.get("state"):
+            return [
+                ConflictDetail(
+                    field="issue.state",
+                    expected=recorded.get("state"),
+                    actual=issue.get("state"),
+                    detail="the issue was opened or closed by someone else since",
+                )
+            ]
+        return []
+
+    def _conflicts_add_labels(self, action: Action, current: dict) -> list[ConflictDetail]:
+        return self._conflicts_labels(action, current, adding=True)
+
+    def _conflicts_remove_labels(self, action: Action, current: dict) -> list[ConflictDetail]:
+        return self._conflicts_labels(action, current, adding=False)
+
+    def _conflicts_labels(
+        self, action: Action, current: dict, *, adding: bool
+    ) -> list[ConflictDetail]:
+        issue = current.get("issue")
+        if issue is None:
+            return [self._missing_issue(action)]
+
+        before = set((action.state_before or {}).get("issue", {}).get("labels") or [])
+        requested = [str(label) for label in action.args.get("labels", [])]
+        if adding:
+            affected = [label for label in requested if label not in before]
+        else:
+            affected = [label for label in requested if label in before]
+        live = set(issue.get("labels") or [])
+
+        conflicts = []
+        for label in affected:
+            if adding and label not in live:
+                conflicts.append(
+                    ConflictDetail(
+                        field="issue.labels",
+                        expected=f"{label!r} present",
+                        actual=sorted(live),
+                        detail=f"{label!r} was already removed by someone else",
+                    )
+                )
+            elif not adding and label in live:
+                conflicts.append(
+                    ConflictDetail(
+                        field="issue.labels",
+                        expected=f"{label!r} absent",
+                        actual=sorted(live),
+                        detail=f"{label!r} was put back by someone else",
+                    )
+                )
+        return conflicts
+
+    @staticmethod
+    def _missing_issue(action: Action) -> ConflictDetail:
+        recorded = (action.state_after or {}).get("issue") or {}
+        return ConflictDetail(
+            field="issue",
+            expected=f"issue #{recorded.get('issue_number')} readable",
+            actual=None,
+            detail="the issue is gone or unreadable",
+        )
 
     # -- rollback -----------------------------------------------------------
 

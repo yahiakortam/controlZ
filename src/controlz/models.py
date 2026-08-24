@@ -252,5 +252,20 @@ class Session(_Base):
         """
         return list(reversed(self.actions))
 
+    def rollback(self, integrations: Any, **kwargs: Any) -> Any:
+        """Roll this session back and return a :class:`~controlz.rollback.RollbackReport`.
+
+        Convenience for ``RollbackEngine(session, integrations).run(**kwargs)``.
+        The session stays a pure data model — the engine is imported here, at
+        call time, because it is the engine that talks to live systems.
+
+            report = session.rollback(github)
+            print(report.summary())
+        """
+        from controlz.rollback import RollbackEngine
+
+        block = kwargs.pop("block_dependencies", True)
+        return RollbackEngine(self, integrations, block_dependencies=block).run(**kwargs)
+
     def __len__(self) -> int:
         return len(self.actions)

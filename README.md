@@ -8,7 +8,8 @@ a few cannot be undone at all. ControlZ records what an agent did, classifies ho
 reversible each step was, and keeps the plan for undoing it.
 
 > **Status: early.** The data model, the durable ledger, the interception layer,
-> and the GitHub integration are here and tested. The TUI is not.
+> the GitHub integration, and conflict-aware rollback are here and tested. The
+> TUI is not.
 
 ## Install
 
@@ -91,6 +92,70 @@ something proves otherwise. A call that raises is recorded as `UNKNOWN` too — 
 may have partially landed, so it wants a human rather than an automatic undo. An
 `IRREVERSIBLE` action may not carry an executable rollback plan; if a plan would
 limit the damage, the action is `COMPENSATABLE`.
+
+## Rollback
+
+`session.rollback(integration)` unwinds a session and returns a report. Three
+rules govern it.
+
+**Order.** Actions are undone in reverse *dependency* order — anything built on
+another action is undone first. With no declared dependencies that is plain
+reverse chronological order; with them, the graph decides. Dependency cycles are
+reported, never silently reordered.
+
+**Never overwrite a surprise.** Before restoring anything, ControlZ re-reads the
+live state and compares it to what the ledger recorded — but only the fields the
+action actually changed. An unrelated edit by someone else does not block a
+rollback that would not have touched it; an edit to the very field being
+restored does. That action is marked `CONFLICT` and left alone until a human
+confirms:
+
+```python
+report = session.rollback(github)
+for entry in report.conflicts:
+    print(entry.reason)          # "live state no longer matches the ledger: …"
+
+# Confirm explicitly, per action or with a callback:
+session.rollback(github, on_conflict=lambda action, conflicts: ask_the_user(action))
+session.rollback(github, force=[some_operation_id])
+```
+
+If the current state cannot be read at all, that is also a conflict. An
+unreadable target is not a green light.
+
+**Say what happened.** Every action appears in the report exactly once, with an
+outcome it earned:
+
+| Outcome | Meaning |
+| --- | --- |
+| `RESTORED` | The rollback plan ran without error. |
+| `NOTHING_TO_DO` | The action changed nothing, so its plan had no steps. |
+| `SKIPPED` | Not undoable: irreversible, unclassified, or planless. |
+| `CONFLICT` | The live state had drifted. Left untouched. |
+| `BLOCKED` | A dependent of this action could not be rolled back. |
+| `FAILED` | The rollback was attempted and raised. |
+| `PLANNED` | Dry run only. |
+| `NOT_ATTEMPTED` | The run stopped before reaching it. |
+
+An irreversible action is never quietly dropped — it is reported as un-restored,
+with the reason. The report exposes the four headline categories (`restored`,
+`skipped_irreversible`, `conflicts`, `failures`) plus `blocked`,
+`nothing_to_do`, `not_attempted`, and `unrestored`.
+
+Two summary properties, deliberately distinct:
+
+- `report.complete` — nothing is left for a human to act on.
+- `report.fully_restored` — everything actually came back.
+
+A session containing one irreversible action is `complete` but **not**
+`fully_restored`. Blurring those two together is exactly the dishonesty this
+layer exists to prevent.
+
+```python
+report = session.rollback(github, dry_run=True)   # check everything, change nothing
+report.counts()        # {'restored': 13, 'nothing_to_do': 1, 'skipped': 1}
+print(report.summary())
+```
 
 ## GitHub integration
 
