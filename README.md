@@ -113,7 +113,7 @@ confirms:
 ```python
 report = session.rollback(github)
 for entry in report.conflicts:
-    print(entry.reason)          # "live state no longer matches the ledger: …"
+    print(entry.reason)  # "live state no longer matches the ledger: …"
 
 # Confirm explicitly, per action or with a callback:
 session.rollback(github, on_conflict=lambda action, conflicts: ask_the_user(action))
@@ -152,8 +152,8 @@ A session containing one irreversible action is `complete` but **not**
 layer exists to prevent.
 
 ```python
-report = session.rollback(github, dry_run=True)   # check everything, change nothing
-report.counts()        # {'restored': 13, 'nothing_to_do': 1, 'skipped': 1}
+report = session.rollback(github, dry_run=True)  # check everything, change nothing
+report.counts()  # {'restored': 13, 'nothing_to_do': 1, 'skipped': 1}
 print(report.summary())
 ```
 
