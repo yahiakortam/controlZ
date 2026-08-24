@@ -12,3 +12,7 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# example output
+rogue-agent.json
+controlz-demo.json

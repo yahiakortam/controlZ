@@ -129,7 +129,9 @@ class Tracker:
                 f"supported: {', '.join(integration.supported_operations())}"
             )
 
-        self.enforce_policy([operation])
+        # One call is judged on its class alone; the whole plan is judged by
+        # check_policy(), which is the one that sees aggregate coverage.
+        self.enforce_policy([operation], scope="call")
 
         state_before = self._snapshot(integration, operation)
 
@@ -244,15 +246,22 @@ class Tracker:
         """Score a proposed plan and apply the policy, changing nothing."""
         return self.gate.check(operations)
 
-    def enforce_policy(self, operations: Iterable[Operation]) -> PolicyDecision | None:
+    def enforce_policy(
+        self, operations: Iterable[Operation], *, scope: str = "task"
+    ) -> PolicyDecision | None:
         """Apply the policy to a plan, raising if it may not proceed.
 
-        A tracker with no policy allows everything, which is the phase-2
-        behaviour and stays the default.
+        ``scope="call"`` applies only the per-class rules, which are the ones
+        that mean anything for a single action; see
+        :meth:`~controlz.policy.Policy.for_single_call`. A tracker with no
+        policy allows everything, which is the default.
         """
         if self.policy is None:
             return None
-        return self.gate.enforce(operations, approve=self.approve)
+        policy = self.policy.for_single_call() if scope == "call" else self.policy
+        return PolicyGate(policy, list(self._integrations.values())).enforce(
+            operations, approve=self.approve
+        )
 
     # -- undo ---------------------------------------------------------------
 

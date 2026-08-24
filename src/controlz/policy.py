@@ -19,7 +19,7 @@ import os
 from collections.abc import Iterable
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -219,6 +219,32 @@ class Policy(BaseModel):
         import yaml
 
         return yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False)
+
+    # -- scope --------------------------------------------------------------
+
+    #: Rules that describe a *plan* rather than a single call.
+    AGGREGATE_RULES: ClassVar[tuple[str, ...]] = (
+        "minimum_score",
+        "max_compensatable",
+        "max_targets",
+    )
+
+    def for_single_call(self) -> Policy:
+        """The part of this policy that means anything for one call in isolation.
+
+        Aggregate rules describe a plan. Applied one action at a time they
+        misfire badly: a lone compensatable call scores 50%, below almost any
+        sensible bar, even when it sits inside a plan scoring 85%. Judging it on
+        its own would block work the policy was never meant to block.
+
+        So a :class:`~controlz.tracker.Tracker` gate applies only the per-class
+        rules — is this kind of action allowed at all? — and the aggregate rules
+        belong to :meth:`~controlz.tracker.Tracker.check_policy`, which sees the
+        whole plan.
+        """
+        return self.model_copy(
+            update={"minimum_score": 0.0, "max_compensatable": None, "max_targets": None}
+        )
 
     # -- evaluation ---------------------------------------------------------
 

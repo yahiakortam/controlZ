@@ -336,7 +336,8 @@ class TestTrackerEnforcement:
         assert issue.state == "closed"
 
     def test_blocked_call_does_not_execute(self, github, issue, repo_name):
-        tracker = Tracker(Ledger(), [github], policy=Policy(minimum_score=99.0))
+        policy = Policy(on_compensatable=Decision.BLOCK)
+        tracker = Tracker(Ledger(), [github], policy=policy)
         with pytest.raises(PolicyViolation):
             tracker.call("github", "create_issue", repo=repo_name, title="Nope")
 
@@ -381,15 +382,66 @@ class TestTrackerEnforcement:
         assert decision.allowed
         assert issue.state == "open"
 
-    def test_policy_applies_per_call_not_per_session(self, github, issue, repo_name):
-        """Each call is judged on its own merits."""
-        policy = Policy(minimum_score=60)
-        tracker = Tracker(Ledger(), [github], policy=policy)
-        tracker.call("github", "close_issue", repo=repo_name, issue_number=issue.number)
-        # A lone compensatable call scores 50%, under the bar.
+    def test_aggregate_rules_do_not_fire_per_call(self, github, issue, repo_name):
+        """A lone compensatable call scores 50%, but that is not a verdict on it.
+
+        minimum_score describes a plan. If the tracker applied it one action at
+        a time, every single compensatable call would be blocked inside a plan
+        the same policy would happily allow.
+        """
+        tracker = Tracker(Ledger(), [github], policy=Policy(minimum_score=60))
+        tracker.call("github", "create_issue", repo=repo_name, title="x")
+        assert len(tracker.ledger) == 1
+
+    def test_the_same_policy_still_judges_the_whole_plan(self, github, repo_name):
+        tracker = Tracker(Ledger(), [github], policy=Policy(minimum_score=60))
+        decision = tracker.check_policy([op("create_issue", title="x")])
+        assert decision.blocked
+        assert decision.findings[0].rule == "minimum_score"
+
+    def test_class_rules_still_apply_per_call(self, github, repo_name):
+        """Scope narrows the aggregate rules; it does not disarm the gate.
+
+        (An UNKNOWN operation cannot reach the gate through a tracker: an
+        integration only supports what is in its classification map, so an
+        unsupported call is refused before the policy is consulted.)
+        """
+        policy = Policy(minimum_score=0, on_compensatable=Decision.REQUIRE_APPROVAL)
+        tracker = Tracker(Ledger(), [github], policy=policy)  # no approver
         with pytest.raises(PolicyViolation):
             tracker.call("github", "create_issue", repo=repo_name, title="x")
-        assert len(tracker.ledger) == 1
+        assert tracker.ledger.actions == []
+
+
+class TestPolicyScope:
+    def test_for_single_call_drops_only_the_aggregate_rules(self):
+        policy = Policy(
+            minimum_score=90,
+            max_compensatable=2,
+            max_targets=5,
+            on_irreversible=Decision.BLOCK,
+            on_unknown=Decision.BLOCK,
+        )
+        narrowed = policy.for_single_call()
+
+        assert narrowed.minimum_score == 0.0
+        assert narrowed.max_compensatable is None
+        assert narrowed.max_targets is None
+        # The per-class rules — the ones that mean something for one action — stay.
+        assert narrowed.on_irreversible is Decision.BLOCK
+        assert narrowed.on_unknown is Decision.BLOCK
+
+    def test_the_original_policy_is_untouched(self):
+        policy = Policy(minimum_score=90)
+        policy.for_single_call()
+        assert policy.minimum_score == 90
+
+    def test_aggregate_rule_names_are_declared(self):
+        assert set(Policy.AGGREGATE_RULES) == {
+            "minimum_score",
+            "max_compensatable",
+            "max_targets",
+        }
 
 
 class TestDecisionReporting:

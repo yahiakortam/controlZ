@@ -50,6 +50,9 @@ packages = ["src/controlz"]
 
 [tool.ruff]
 line-length = 100
+# Markdown holds illustrative snippets - methods at method indentation,
+# partial classes, deliberate gaps. Formatting them breaks the teaching.
+extend-exclude = ["*.md"]
 src = ["src", "tests"]
 target-version = "py310"
 
