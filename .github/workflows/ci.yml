@@ -47,3 +47,10 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
       - name: pytest
         run: pytest
+
+      - name: Smoke the CLI and the example
+        run: |
+          cz --version
+          controlz --help > /dev/null
+          python examples/rogue_agent.py --pace 0 --ledger /tmp/smoke.json > /dev/null
+          cz score /tmp/smoke.json > /dev/null
