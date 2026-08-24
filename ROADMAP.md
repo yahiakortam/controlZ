@@ -35,9 +35,9 @@ Every classification today is hand-written. That is the right default — it is 
 
 ## Good first issues
 
-Three self-contained pieces of work. Each says what "done" looks like, so you are not guessing.
+Three self-contained pieces of work, each open as an issue. Each says what "done" looks like, so you are not guessing.
 
-### 🟢 Add a Slack integration
+### 🟢 [Add a Slack integration](https://github.com/yahiakortam/controlZ/issues/1)
 
 **Why:** Agents post to Slack constantly, and a wrong message in the wrong channel is exactly the mistake ControlZ should catch. It is also the cleanest illustration of `COMPENSATABLE` in the codebase: you can delete a Slack message, but everyone was already notified.
 
@@ -66,7 +66,7 @@ Suggested operations and classifications:
 
 ---
 
-### 🟢 Add a HubSpot integration
+### 🟢 [Add a HubSpot integration](https://github.com/yahiakortam/controlZ/issues/2)
 
 **Why:** This is where the stakes get real. An agent mangling a CRM touches revenue, and "which of these 40 contact updates can we take back?" is a question people actually have to answer. It also stresses parts of the design GitHub does not: bulk operations, custom properties, and downstream workflow automation.
 
@@ -93,7 +93,7 @@ Getting this reasoning right matters more than the code.
 
 ---
 
-### 🔬 Research: can classification be automated?
+### 🔬 [Research: can classification be automated?](https://github.com/yahiakortam/controlZ/issues/3)
 
 **Why:** Hand-written classification is auditable and never guesses, which is why it is the default and will stay the default for anything shipped. But it does not scale past a few dozen endpoints, and it is the main reason adding an integration takes an afternoon rather than ten minutes.
 

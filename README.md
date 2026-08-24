@@ -175,7 +175,7 @@ cz rollback run.json     # rewind from the terminal (--dry-run, --force)
 | **GitHub** | `create_issue`, `update_issue`, `add_labels`, `remove_labels`, `close_issue`, `reopen_issue`, `create_comment`, `delete_comment` |
 | **In-memory GitHub** | the same surface, no credentials — for demos and tests |
 
-Adding another is a single class with five methods: see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-integration). Slack and HubSpot are open as good first issues in the [roadmap](ROADMAP.md).
+Adding another is a single class with five methods: see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-integration). Slack ([#1](https://github.com/yahiakortam/controlZ/issues/1)) and HubSpot ([#2](https://github.com/yahiakortam/controlZ/issues/2)) are open as good first issues.
 
 ## Documentation
 
