@@ -20,6 +20,7 @@ from controlz import (
     Ledger,
     Operation,
     Reversibility,
+    RollbackOutcome,
     Session,
     Tracker,
 )
@@ -103,7 +104,7 @@ class TestLiveTracking:
             assert action.rollback_plan.strategy == "close-created-issue"
             assert action.rollback_plan.steps[0].args["issue_number"] == created.number
 
-            tracker.rollback(action)
+            assert tracker.rollback_action(action).outcome is RollbackOutcome.RESTORED
             assert integration.client.get_repo(REPO).get_issue(created.number).state == "closed"
         finally:
             integration.execute(
@@ -128,7 +129,8 @@ class TestLiveTracking:
         assert tracked.action.reversibility is Reversibility.REVERSIBLE
         assert tracked.action.state_after["issue"]["title"] == new_title
 
-        tracker.rollback(tracked.action)
+        entry = tracker.rollback_action(tracked.action)
+        assert entry.outcome is RollbackOutcome.RESTORED, entry.reason
         assert integration.client.get_repo(REPO).get_issue(issue_number).title == original
 
     def test_comment_created_then_deleted(self, tracker, integration, issue_number):
@@ -142,7 +144,8 @@ class TestLiveTracking:
         assert action.state_before["comment"] is None
         assert action.state_after["comment"]["comment_id"] == tracked.id
 
-        tracker.rollback(action)
+        entry = tracker.rollback_action(action)
+        assert entry.outcome is RollbackOutcome.RESTORED, entry.reason
         issue = integration.client.get_repo(REPO).get_issue(issue_number)
         assert tracked.id not in [comment.id for comment in issue.get_comments()]
 
@@ -158,7 +161,8 @@ class TestLiveTracking:
         # LABEL was already on the issue, so the plan must not strip it.
         assert action.rollback_plan.steps[0].args["labels"] == [extra]
 
-        tracker.rollback(action)
+        entry = tracker.rollback_action(action)
+        assert entry.outcome is RollbackOutcome.RESTORED, entry.reason
         issue = integration.client.get_repo(REPO).get_issue(issue_number)
         assert (
             sorted(label.name for label in issue.labels) == action.state_before["issue"]["labels"]
@@ -172,7 +176,8 @@ class TestLiveTracking:
         assert action.state_after["issue"]["state"] == "closed"
         assert action.rollback_plan.steps[0].api_call == "reopen_issue"
 
-        tracker.rollback(action)
+        entry = tracker.rollback_action(action)
+        assert entry.outcome is RollbackOutcome.RESTORED, entry.reason
         assert integration.client.get_repo(REPO).get_issue(issue_number).state == "open"
 
     def test_session_survives_a_ledger_round_trip(self, tracker, tmp_path, issue_number):
@@ -189,8 +194,9 @@ class TestLiveTracking:
 
         # Roll back from the reloaded ledger, not the in-memory one.
         replay = Tracker(reloaded, [tracker.integration_for("github")])
-        undone = replay.rollback_session()
-        assert [a.api_call for a in undone] == ["close_issue", "add_labels"]
+        report = replay.rollback()
+        assert [e.api_call for e in report.restored] == ["close_issue", "add_labels"]
+        assert report.fully_restored, report.summary()
 
 
 class TestLiveRollback:
