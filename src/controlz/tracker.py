@@ -14,12 +14,14 @@ plan, and writes a complete :class:`~controlz.models.Action` to the ledger.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 from controlz.integrations import Integration, UnsupportedOperationError
 from controlz.ledger import Ledger
 from controlz.models import Action, Operation, Reversibility
+from controlz.policy import Policy, PolicyDecision, PolicyGate
 from controlz.rollback import RollbackEngine, RollbackReport
 
 __all__ = ["ToolProxy", "TrackedCall", "Tracker", "TrackingError"]
@@ -46,6 +48,8 @@ class Tracker:
         integrations: list[Integration] | None = None,
         *,
         snapshot_errors: str = "record",
+        policy: Policy | None = None,
+        approve: Callable[[PolicyDecision], bool] | None = None,
     ) -> None:
         """
         Args:
@@ -54,11 +58,18 @@ class Tracker:
             snapshot_errors: What to do when a *snapshot* fails — ``"record"``
                 (default) proceeds with the call and stores the error in place
                 of the state, or ``"raise"`` to refuse to act blind.
+            policy: Checked before every call. A blocked call raises
+                :class:`~controlz.policy.PolicyViolation` and is not recorded,
+                because it never happened.
+            approve: Called with the decision when the policy wants a human.
+                Return ``True`` to let the call proceed.
         """
         if snapshot_errors not in ("record", "raise"):
             raise ValueError("snapshot_errors must be 'record' or 'raise'")
         self.ledger = ledger if ledger is not None else Ledger()
         self.snapshot_errors = snapshot_errors
+        self.policy = policy
+        self.approve = approve
         self._integrations: dict[str, Integration] = {}
         for integration in integrations or []:
             self.register(integration)
@@ -117,6 +128,8 @@ class Tracker:
                 f"{operation.tool!r} does not support {operation.api_call!r}; "
                 f"supported: {', '.join(integration.supported_operations())}"
             )
+
+        self.enforce_policy([operation])
 
         state_before = self._snapshot(integration, operation)
 
@@ -215,6 +228,31 @@ class Tracker:
         """
         self.integration_for(name)
         return ToolProxy(self, name)
+
+    # -- policy ---------------------------------------------------------------
+
+    @property
+    def gate(self) -> PolicyGate:
+        """A policy gate over this tracker's policy and integrations."""
+        return PolicyGate(self.policy, list(self._integrations.values()))
+
+    def score(self, operations: Iterable[Operation]):
+        """Score a proposed plan without running any of it."""
+        return self.gate.score(operations)
+
+    def check_policy(self, operations: Iterable[Operation]) -> PolicyDecision:
+        """Score a proposed plan and apply the policy, changing nothing."""
+        return self.gate.check(operations)
+
+    def enforce_policy(self, operations: Iterable[Operation]) -> PolicyDecision | None:
+        """Apply the policy to a plan, raising if it may not proceed.
+
+        A tracker with no policy allows everything, which is the phase-2
+        behaviour and stays the default.
+        """
+        if self.policy is None:
+            return None
+        return self.gate.enforce(operations, approve=self.approve)
 
     # -- undo ---------------------------------------------------------------
 

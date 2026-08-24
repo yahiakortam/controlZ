@@ -110,6 +110,14 @@ class GitHubIntegration(Integration):
             raise IntegrationError("'labels' must be a list of label names")
         return [str(label) for label in labels]
 
+    def describe_target(self, operation: Operation) -> str:
+        """``owner/repo#12`` when the operation names an issue, else ``owner/repo``."""
+        repo = operation.args.get("repo")
+        if not repo:
+            return self.name
+        number = operation.args.get("issue_number")
+        return f"{repo}#{number}" if number else str(repo)
+
     # -- state capture ------------------------------------------------------
 
     @staticmethod

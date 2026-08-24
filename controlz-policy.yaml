@@ -1,0 +1,29 @@
+# Example ControlZ policy.
+#
+# Every setting is optional; what is not set here takes the cautious default.
+# Verdicts are: allow | require_approval | block. The strictest match wins.
+
+name: example
+
+# Block the task outright if less than this share of it could be taken back.
+# Coverage is weighted: reversible counts 1, compensatable counts 0.5.
+minimum_score: 60
+below_minimum_score: block
+
+# Ordinary reversible work needs no supervision.
+on_reversible: allow
+
+# Compensation is real but partial, so a few is fine and a pile is not.
+on_compensatable: allow
+max_compensatable: 3
+over_compensatable_limit: require_approval
+
+# Nothing can undo these, so a human decides.
+on_irreversible: require_approval
+
+# Unclassified is treated as potentially irreversible, deliberately.
+on_unknown: require_approval
+
+# How much of the world one task may touch.
+max_targets: 10
+over_target_limit: require_approval

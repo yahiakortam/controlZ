@@ -27,6 +27,7 @@ dependencies = [
     "rich>=13.7",
     "textual>=0.60",
     "PyGithub>=2.3",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

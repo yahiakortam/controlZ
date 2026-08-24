@@ -159,6 +159,19 @@ class Integration(ABC):
 
     # -- optional hooks -----------------------------------------------------
 
+    def describe_target(self, operation: Operation) -> str:
+        """A short human label for what this operation touches.
+
+        Used in blast-radius readouts, so it should identify the *thing*, not
+        the call: ``acme/widgets#12`` rather than ``update_issue``. The default
+        picks the first identifying argument it recognises.
+        """
+        args = operation.args
+        for key in ("repo", "repository", "resource", "path", "url", "key", "id"):
+            if args.get(key):
+                return str(args[key])
+        return self.name
+
     def snapshot_after(self, operation: Operation, result: Any) -> dict[str, Any] | None:
         """Capture state once the operation has run.
 

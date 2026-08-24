@@ -8,8 +8,8 @@ a few cannot be undone at all. ControlZ records what an agent did, classifies ho
 reversible each step was, and keeps the plan for undoing it.
 
 > **Status: early.** The data model, the durable ledger, the interception layer,
-> the GitHub integration, and conflict-aware rollback are here and tested. The
-> TUI is not.
+> the GitHub integration, conflict-aware rollback, and the pre-execution policy
+> gate are here and tested. The TUI is not.
 
 ## Install
 
@@ -85,6 +85,9 @@ for action in reloaded.session.undo_order():
 | `Ledger` | Appends actions to a session and persists it to a JSON file (atomically), then reloads it. |
 | `Integration` | The abstract backend: `snapshot`, `classify`, `build_rollback_plan`, `execute_rollback` — plus `execute`, so the tracker can wrap a call rather than merely observe one. |
 | `Tracker` | The interception layer: snapshot → execute → snapshot → classify → plan → record. |
+| `ReversibilityScore` / `BlastRadius` | Pre-execution scoring: weighted coverage, plus what the plan touches. |
+| `Policy` / `PolicyGate` | Rules in YAML or a dict, turned into allow / require approval / block. |
+| `RollbackReport` | Per-action account of a rollback: restored, skipped, conflicts, failures. |
 
 `UNKNOWN` is the default classification, and it is deliberately the *unsafe*
 one: an unclassified action should be treated as potentially irreversible until
@@ -92,6 +95,84 @@ something proves otherwise. A call that raises is recorded as `UNKNOWN` too — 
 may have partially landed, so it wants a human rather than an automatic undo. An
 `IRREVERSIBLE` action may not carry an executable rollback plan; if a plan would
 limit the damage, the action is `COMPENSATABLE`.
+
+## Reversibility score and policy gate
+
+Before anything runs, score the plan:
+
+```python
+from controlz import Policy, PolicyGate, reversibility_score
+from controlz.integrations.github import GitHubIntegration
+
+score = reversibility_score(planned_operations, GitHubIntegration(token=...))
+score.coverage  # 83.3
+print(score.summary())
+```
+
+```
+reversibility score: 83.3% over 6 actions
+  3 reversible, 3 compensatable, 0 irreversible, 0 unknown
+  blast radius: github x6 across 3 targets
+```
+
+Coverage is **weighted**, and the weights encode a judgement: a reversible
+action counts 1.0, a compensatable one counts 0.5, and irreversible and unknown
+count nothing. Compensation is real but partial — the retraction went out, but
+the email was still read. Two unweighted figures sit alongside it when the
+distinction matters: `recoverable_share` (has *any* way back) and
+`fully_reversible_share` (restores exactly).
+
+The blast radius answers a different question — not "can we undo it?" but "how
+much of the world does this touch?": calls per tool, calls per operation,
+distinct targets, and every action that could not be taken back, named.
+
+### Policy
+
+```yaml
+# controlz-policy.yaml
+name: example
+minimum_score: 60          # block outright below this coverage
+below_minimum_score: block
+
+on_reversible: allow       # ordinary work needs no supervision
+on_compensatable: allow
+max_compensatable: 3       # a few is fine, a pile is not
+over_compensatable_limit: require_approval
+
+on_irreversible: require_approval
+on_unknown: require_approval   # unclassified is treated as irreversible
+max_targets: 10
+over_target_limit: require_approval
+```
+
+```python
+policy = Policy.from_yaml("controlz-policy.yaml")  # or Policy.from_dict({...})
+gate = PolicyGate(policy, github)
+
+decision = gate.check(planned)  # score + verdict, changes nothing
+gate.enforce(planned, approve=ask_a_human)  # raises PolicyViolation if refused
+```
+
+Every rule reports, including the ones that would have allowed the plan, and the
+**strictest verdict wins**. A block is not approvable: approval is for judgement
+calls, and a plan under the minimum score is not one.
+
+Wire the gate into a tracker and it stops calls rather than merely describing
+them. A blocked call never executes and is never recorded, because it never
+happened:
+
+```python
+tracker = Tracker(ledger, [github], policy=policy, approve=ask_a_human)
+tracker.call("github", "create_issue", ...)  # PolicyViolation if the policy refuses
+```
+
+See it end to end, with no GitHub credentials and nothing executed:
+
+```bash
+python scripts/demo_policy.py --plan safe        # cleared
+python scripts/demo_policy.py --plan risky       # held for approval
+python scripts/demo_policy.py --plan reckless    # refused
+```
 
 ## Rollback
 
