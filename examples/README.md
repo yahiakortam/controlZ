@@ -65,3 +65,26 @@ the same tools; ControlZ records and gates every call on the way through.
 The file is worth reading even if you use a different server — it shows what
 each classification is claiming, and why `read` is the line that decides whether
 a previous value can be restored at all.
+
+## `mcp-filesystem.yaml` — undo for an agent that writes files
+
+```bash
+pip install -e '.[mcp]'
+cz proxy --spec examples/mcp-filesystem.yaml --check \
+    -- npx -y @modelcontextprotocol/server-filesystem /path/to/project
+```
+
+Verified end to end against the real server. Overwriting a file restores the
+previous contents exactly; moving one moves it back. **Creating** a file is
+reported as un-restored, because that server exposes no way to delete a file —
+and the report says exactly that rather than pretending:
+
+```
+2 of 3 actions restored
+  not undoable: write_file — nothing was read before this call — most often the
+  target did not exist yet — so content='$before.text' cannot be filled in, and
+  there is no prior state to restore
+```
+
+That one absence, no delete tool, decides most of the classifications in the
+file. Reversibility is a property of what you can reach, not of the idea.

@@ -150,6 +150,18 @@ class Integration(ABC):
             )
         ]
 
+    def explain_no_plan(self, action: Action) -> str | None:
+        """Why this action has no rollback plan, when the reason is knowable.
+
+        "No plan was recorded" is true but unhelpful. An integration usually
+        knows the actual reason — the file did not exist beforehand, the read
+        failed, the operation was never configured — and a report that says so
+        is worth far more to whoever has to decide what to do next.
+
+        Returning ``None`` falls back to the generic wording.
+        """
+        return None
+
     def execute_rollback_plan(self, action: Action) -> None:
         """Run each step of an action's plan through :meth:`execute`."""
         plan = action.rollback_plan

@@ -359,7 +359,10 @@ class RollbackEngine:
 
         plan = action.rollback_plan
         if plan is None:
-            entry.reason = "no rollback plan was recorded for this action"
+            entry.reason = (
+                integration.explain_no_plan(action)
+                or "no rollback plan was recorded for this action"
+            )
             return entry, None
         if not plan.is_executable:
             entry.outcome = RollbackOutcome.NOTHING_TO_DO

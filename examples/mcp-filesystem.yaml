@@ -1,0 +1,92 @@
+# What ControlZ knows about the filesystem MCP server.
+#
+#   cz proxy --spec examples/mcp-filesystem.yaml --check \
+#       -- npx -y @modelcontextprotocol/server-filesystem /path/to/project
+#
+# Writing files is the most common thing an agent does that people want back,
+# so this is probably the spec to start from.
+#
+# Verified against @modelcontextprotocol/server-filesystem, which advertises 14
+# tools. Run --check before trusting it: a tool name that does not exist means a
+# rollback that quietly does nothing.
+#
+# The important thing this server does NOT have is a delete tool. That single
+# absence decides most of the classifications below, and it is a good example of
+# why reversibility is a property of *what you can reach*, not of the idea.
+
+tool: filesystem
+
+operations:
+  # ---------------------------------------------------------------------
+  # Overwriting a file is exactly reversible — write the old bytes back.
+  # Creating one is not, because nothing here can remove a file.
+  #
+  # The same tool does both, and ControlZ classifies per operation rather
+  # than per call, so this is COMPENSATABLE: the common case is a true undo,
+  # and the other case is not, and claiming REVERSIBLE would be a promise
+  # that quietly fails on new files. When torn, take the pessimistic label.
+  write_file:
+    reversibility: compensatable
+    read:
+      tool: read_text_file
+      args:
+        path: "$args.path"
+    undo:
+      tool: write_file
+      args:
+        path: "$args.path"
+        content: "$before.text"
+      description: Write the file's previous contents back.
+      notes: >-
+        Restores the previous contents exactly when the file already existed.
+        If the agent created the file, there was nothing to read, so no plan is
+        built and the action is reported as un-restored — this server exposes
+        no way to delete a file.
+    conflict_fields: [text]
+
+  # ---------------------------------------------------------------------
+  # A line edit requires the file to exist, so prior contents are always
+  # readable, and writing them back restores it exactly.
+  edit_file:
+    reversibility: reversible
+    read:
+      tool: read_text_file
+      args:
+        path: "$args.path"
+    undo:
+      tool: write_file
+      args:
+        path: "$args.path"
+        content: "$before.text"
+      description: Restore the file's contents from before the edit.
+    conflict_fields: [text]
+
+  # ---------------------------------------------------------------------
+  # The clean one: its own inverse, and it needs no prior state at all.
+  move_file:
+    reversibility: reversible
+    undo:
+      tool: move_file
+      args:
+        source: "$args.destination"
+        destination: "$args.source"
+      description: Move the file back where it came from.
+
+# ---------------------------------------------------------------------------
+# Deliberately absent:
+#
+#   create_directory
+#     No rmdir tool exists here, so a directory the agent creates cannot be
+#     removed. Unlisted means UNKNOWN: recorded, refused by the default policy,
+#     never claimed as recoverable.
+#
+#   read_file, read_text_file, read_media_file, read_multiple_files,
+#   list_directory, list_directory_with_sizes, directory_tree, search_files,
+#   get_file_info, list_allowed_directories
+#     Read-only. Nothing to undo, so nothing to declare. They pass through
+#     recorded as UNKNOWN, which costs a prompt if you gate on unknowns — a fair
+#     trade for not maintaining a list of everything harmless.
+#
+# A note on blast radius: this server is confined to the directories it is
+# launched with. That is a real safety boundary and it is the server's, not
+# ControlZ's. Launch it with the narrowest path that works.

@@ -36,7 +36,7 @@ from controlz.integrations import Integration, IntegrationError
 from controlz.models import Action, Operation, Reversibility, RollbackPlan, RollbackStep
 from controlz.rollback import ConflictDetail
 
-__all__ = ["MCPIntegration", "OperationSpec", "ReadSpec", "ServerSpec"]
+__all__ = ["UNRESOLVED", "MCPIntegration", "OperationSpec", "ReadSpec", "ServerSpec"]
 
 
 class UndoSpec(BaseModel):
@@ -114,6 +114,24 @@ class OperationSpec(BaseModel):
         return {key: _resolve(value, args, {}, {}) for key, value in self.read.args.items()}
 
 
+class _Unresolved:
+    """A placeholder that pointed at nothing.
+
+    Distinct from ``None``, which is a legitimate value. The difference decides
+    whether an undo can be built at all: writing an unresolved placeholder into
+    a rollback call is how you overwrite a file with the string "None".
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unresolved>"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+UNRESOLVED = _Unresolved()
+
+
 def _resolve(
     value: Any,
     args: dict[str, Any],
@@ -123,7 +141,9 @@ def _resolve(
     """Substitute a ``$args.x`` / ``$result.x`` / ``$before.x`` placeholder.
 
     ``$before`` is the one that matters for restoring a previous value, and it
-    is only available when the operation declares a read tool.
+    is only available when the operation declares a read tool. Returns
+    :data:`UNRESOLVED` when the placeholder points at something that is not
+    there — never a plausible-looking substitute.
     """
     if not isinstance(value, str) or not value.startswith("$"):
         return value
@@ -133,10 +153,10 @@ def _resolve(
         return value
     current: Any = root
     for part in path.split("."):
-        if isinstance(current, dict):
-            current = current.get(part)
+        if isinstance(current, dict) and part in current:
+            current = current[part]
         else:
-            return None
+            return UNRESOLVED
     return current
 
 
@@ -248,8 +268,16 @@ class MCPIntegration(Integration):
         spec = self.spec.operations.get(api_call)
         if spec is None or spec.read is None:
             return None
-        result = await self.session.call_tool(spec.read.tool, spec.read_args(args))
-        return _result_payload(result)
+        read_args = spec.read_args(args)
+        if any(value is UNRESOLVED for value in read_args.values()):
+            return None
+        result = await self.session.call_tool(spec.read.tool, read_args)
+        if getattr(result, "is_error", False):
+            # A failed read is not prior state. Returning its error text would
+            # let a rollback write that text in place of the file's contents.
+            return None
+        payload = _result_payload(result)
+        return None if payload.get("is_error") else payload
 
     async def asnapshot(self, operation: Operation) -> dict[str, Any] | None:
         """Capture prior state, if the operation declares a way to read it.
@@ -345,6 +373,12 @@ class MCPIntegration(Integration):
         result = (action.state_after or {}).get("result") or {}
         before = (action.state_before or {}).get("before") or {}
         args = spec.resolved_args(action.args, result, before)
+        if any(value is UNRESOLVED for value in args.values()):
+            # A placeholder pointed at nothing — most often $before on a file
+            # that did not exist, or $result from a call that failed. Refusing
+            # to build the plan reports the action as un-restored, which is
+            # true. Building one would call the undo with a fabricated value.
+            return None
         if spec.undo.notes:
             notes = spec.undo.notes
         elif spec.read is None:
@@ -368,6 +402,38 @@ class MCPIntegration(Integration):
             ],
             notes=notes,
         )
+
+    def explain_no_plan(self, action: Action) -> str | None:
+        """Say which of the several reasons applies, rather than "no plan"."""
+        spec = self.spec.operations.get(action.api_call)
+        if spec is None:
+            return (
+                f"{action.api_call!r} is not described in the spec for "
+                f"{self.name!r}, so ControlZ was never told how to undo it"
+            )
+        if spec.undo is None:
+            return f"the spec for {action.api_call!r} declares no way to undo it"
+        if action.state_after is None:
+            return "the call never completed, so there is nothing to undo"
+
+        result = (action.state_after or {}).get("result") or {}
+        before = (action.state_before or {}).get("before") or {}
+        unresolved = [
+            f"{key}={value!r}"
+            for key, value in spec.undo.args.items()
+            if _resolve(value, action.args, result, before) is UNRESOLVED
+        ]
+        if unresolved:
+            if spec.read is not None and not before:
+                return (
+                    f"nothing was read before this call — most often the target did "
+                    f"not exist yet — so {', '.join(unresolved)} cannot be filled in, "
+                    "and there is no prior state to restore"
+                )
+            return (
+                f"the undo needs {', '.join(unresolved)}, which is not present in what was recorded"
+            )
+        return None
 
     # -- the synchronous half does not exist --------------------------------
 

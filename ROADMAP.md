@@ -29,6 +29,7 @@ Every classification today is hand-written. That is the right default — it is 
 
 The proxy ships, but it is new and the edges show:
 
+- **More verified specs.** Filesystem and GitHub ship today. Linear, Notion, Slack, and Playwright are the obvious next ones, and each is a YAML file plus a `--check` run rather than a Python class.
 - **A spec registry.** Every user of the GitHub MCP server writes the same YAML. These belong in a shared, reviewable collection rather than in everyone's home directory.
 - **Degrade a classification when its undo is missing.** `--check` reports a spec naming a tool the server lacks, but the classification still claims the action is recoverable and the score still counts it. Downgrading to `UNKNOWN` automatically would make the score honest without anyone having to read a warning.
 - **Resources and prompts.** The proxy forwards `tools/list` and `tools/call`. An MCP server can also expose resources and prompts, which pass through untouched today because they are not forwarded at all.

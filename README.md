@@ -164,6 +164,11 @@ through.
 This inverts the integration problem. A Python integration teaches ControlZ one
 API; a proxy wraps the protocol once and works with any MCP server there is.
 
+Two verified specs ship with it — [`examples/mcp-filesystem.yaml`](examples/mcp-filesystem.yaml)
+and [`examples/mcp-github.yaml`](examples/mcp-github.yaml). The filesystem one is
+probably where to start: writing files is the most common thing an agent does
+that people want back.
+
 ### It still refuses to guess
 
 An arbitrary tool is `UNKNOWN`, and `UNKNOWN` is treated as potentially

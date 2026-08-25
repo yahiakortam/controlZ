@@ -772,3 +772,157 @@ class TestSpecChecking:
             assert captured.out == ""
         finally:
             await client.__aexit__(None, None, None)
+
+
+class TestUnresolvedPlaceholders:
+    """A placeholder pointing at nothing must not become a fabricated value.
+
+    The motivating case: a write to a file that did not exist. Reading it first
+    fails, so `$before.text` resolves to nothing — and an undo built anyway
+    would write the string "None", or a read error message, into the file.
+    """
+
+    NEW_FILE_SPEC = ServerSpec.model_validate(
+        {
+            "tool": "notes",
+            "operations": {
+                "rename_note": {
+                    "reversibility": "reversible",
+                    "read": {"tool": "get_note", "args": {"note_id": "$args.note_id"}},
+                    "undo": {
+                        "tool": "rename_note",
+                        "args": {"note_id": "$args.note_id", "title": "$before.title"},
+                    },
+                }
+            },
+        }
+    )
+
+    async def test_no_plan_is_built_when_prior_state_is_missing(self, upstream, world):
+        """get_note on a missing note returns {}, so $before.title is unresolvable."""
+        client, proxy = await proxied(upstream, spec=self.NEW_FILE_SPEC)
+        try:
+            # note 99 does not exist, so the read comes back empty
+            await proxy.call_tool(
+                None,
+                types.CallToolRequestParams(
+                    name="rename_note", arguments={"note_id": 99, "title": "x"}
+                ),
+            )
+            action = proxy.ledger.actions[0]
+            assert action.rollback_plan is None
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_the_report_explains_why(self, upstream, world):
+        client, proxy = await proxied(upstream, spec=self.NEW_FILE_SPEC)
+        try:
+            await proxy.call_tool(
+                None,
+                types.CallToolRequestParams(
+                    name="rename_note", arguments={"note_id": 99, "title": "x"}
+                ),
+            )
+            report = await proxy.tracker.arollback()
+            reason = report.skipped_irreversible[0].reason
+
+            assert "no rollback plan was recorded" not in reason
+            assert "$before.title" in reason
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_an_unconfigured_operation_is_caught_earlier(self, upstream):
+        """It never reaches the no-plan branch: UNKNOWN already explains it."""
+        client, proxy = await proxied(upstream)
+        try:
+            await proxy.call_tool(
+                None, types.CallToolRequestParams(name="delete_note", arguments={"note_id": 1})
+            )
+            report = await proxy.tracker.arollback()
+            assert "classified unknown" in report.skipped_irreversible[0].reason
+        finally:
+            await client.__aexit__(None, None, None)
+
+    def test_explain_no_plan_covers_each_reason(self):
+        """The method is pure, so test its branches directly.
+
+        Reaching some of these through a live proxy would need contrived
+        setups — the ledger carries its plan, so a replay still has one.
+        """
+        from controlz import Action
+        from controlz.mcp import MCPIntegration
+
+        integration = MCPIntegration(session=None, spec=SPEC)
+
+        def action(api_call, **kwargs):
+            return Action(session_id="s", tool="notes", api_call=api_call, **kwargs)
+
+        # An operation the spec has never heard of.
+        unknown = integration.explain_no_plan(action("obliterate", state_after={}))
+        assert "not described in the spec" in unknown
+
+        # Described, but with no undo declared.
+        no_undo_spec = ServerSpec.model_validate(
+            {"tool": "notes", "operations": {"ping": {"reversibility": "reversible"}}}
+        )
+        no_undo = MCPIntegration(None, no_undo_spec).explain_no_plan(action("ping", state_after={}))
+        assert "declares no way to undo it" in no_undo
+
+        # Never completed.
+        incomplete = integration.explain_no_plan(action("create_note", state_after=None))
+        assert "never completed" in incomplete
+
+        # Completed, but the placeholder points at nothing.
+        missing = integration.explain_no_plan(action("create_note", state_after={"result": {}}))
+        assert "$result.id" in missing
+
+        # Nothing to explain when the plan could have been built.
+        fine = integration.explain_no_plan(action("create_note", state_after={"result": {"id": 7}}))
+        assert fine is None
+
+    def test_unresolved_is_distinct_from_none(self):
+        from controlz.mcp.integration import UNRESOLVED, _resolve
+
+        # A key that is present but null resolves to None, not UNRESOLVED.
+        assert _resolve("$before.title", {}, {}, {"title": None}) is None
+        # A key that is absent resolves to UNRESOLVED.
+        assert _resolve("$before.title", {}, {}, {}) is UNRESOLVED
+        assert bool(UNRESOLVED) is False
+
+
+class TestShippedFilesystemSpec:
+    def test_it_parses(self):
+        from pathlib import Path
+
+        spec = ServerSpec.from_yaml(
+            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
+        )
+        assert spec.tool == "filesystem"
+        assert set(spec.operations) == {"write_file", "edit_file", "move_file"}
+
+    def test_write_file_is_not_claimed_fully_reversible(self):
+        """This server has no delete tool, so a created file cannot be removed."""
+        from pathlib import Path
+
+        spec = ServerSpec.from_yaml(
+            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
+        )
+        assert spec.operations["write_file"].reversibility is Reversibility.COMPENSATABLE
+        assert "no way to delete" in spec.operations["write_file"].undo.notes
+
+    def test_every_reversible_operation_can_read_prior_state(self):
+        """Except move_file, which is its own inverse and needs no prior state."""
+        from pathlib import Path
+
+        spec = ServerSpec.from_yaml(
+            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
+        )
+        for name, operation in spec.operations.items():
+            if operation.reversibility is not Reversibility.REVERSIBLE:
+                continue
+            needs_before = any(
+                isinstance(v, str) and v.startswith("$before")
+                for v in (operation.undo.args if operation.undo else {}).values()
+            )
+            if needs_before:
+                assert operation.read is not None, f"{name} needs prior state it cannot read"
