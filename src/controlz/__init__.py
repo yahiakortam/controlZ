@@ -38,7 +38,7 @@ from controlz.score import (
 )
 from controlz.tracker import ToolProxy, TrackedCall, Tracker, TrackingError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Action",
