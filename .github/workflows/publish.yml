@@ -1,0 +1,101 @@
+name: Publish to PyPI
+
+# Publishing happens on a tag, using PyPI's trusted publishing — so there is no
+# API token stored in this repository at all. GitHub proves the workflow's
+# identity to PyPI directly.
+#
+# One-time setup, on PyPI:
+#   https://pypi.org/manage/account/publishing/
+#   PyPI project name : controlz
+#   Owner             : yahiakortam
+#   Repository        : controlZ
+#   Workflow          : publish.yml
+#   Environment       : pypi
+#
+# Then: git tag vX.Y.Z && git push origin vX.Y.Z
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # for a dry run into TestPyPI, or a retry
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        # A tag that disagrees with pyproject.toml publishes the wrong version
+        # under the right name, which cannot be undone — PyPI does not allow
+        # re-uploading a version.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG  pyproject=$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $VERSION in pyproject.toml"
+            exit 1
+          fi
+
+      - name: Build
+        run: python -m build
+
+      - name: Check the metadata renders
+        run: twine check dist/*
+
+      - name: Confirm the bundled specs are in the wheel
+        # They are data files, not code, so they are exactly the thing a
+        # packaging change silently drops.
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = zipfile.ZipFile(wheel).namelist()
+          specs = [n for n in names if n.startswith("controlz/specs/") and n.endswith(".yaml")]
+          print("specs in wheel:", specs)
+          if not specs:
+              sys.exit("::error::No bundled specs in the wheel — `cz connect` would be broken.")
+          PY
+
+      - name: Install the wheel and run it
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install --quiet "$(ls dist/*.whl)[mcp]"
+          /tmp/check/bin/cz --version
+          /tmp/check/bin/cz connect --list
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/controlz/
+    permissions:
+      id-token: write # trusted publishing; no token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

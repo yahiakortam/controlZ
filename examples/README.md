@@ -51,27 +51,23 @@ cz watch --demo
 
 The same chaos agent, streaming into the TUI. Press `R` to rewind.
 
-## `mcp-github.yaml` — teaching the proxy about a real MCP server
+## `cz connect github` — teaching the proxy about a real MCP server
 
 ```bash
-pip install -e '.[mcp]'      # not on PyPI yet; see Quickstart
-cz proxy --spec examples/mcp-github.yaml --ledger run.json \
-    -- npx -y @modelcontextprotocol/server-github
+cz connect github
 ```
 
 Point your agent's MCP config at that command instead of the server's. It sees
 the same tools; ControlZ records and gates every call on the way through.
 
-The file is worth reading even if you use a different server — it shows what
+The spec at `src/controlz/specs/github.yaml` is worth reading even if you use a different server — it shows what
 each classification is claiming, and why `read` is the line that decides whether
 a previous value can be restored at all.
 
-## `mcp-filesystem.yaml` — undo for an agent that writes files
+## `cz connect filesystem` — undo for an agent that writes files
 
 ```bash
-pip install -e '.[mcp]'
-cz proxy --spec examples/mcp-filesystem.yaml --check \
-    -- npx -y @modelcontextprotocol/server-filesystem /path/to/project
+cz connect filesystem /path/to/project
 ```
 
 Verified end to end against the real server. Overwriting a file restores the
@@ -86,5 +82,5 @@ and the report says exactly that rather than pretending:
   there is no prior state to restore
 ```
 
-That one absence, no delete tool, decides most of the classifications in the
-file. Reversibility is a property of what you can reach, not of the idea.
+That one absence, no delete tool, decides most of the classifications in
+`src/controlz/specs/filesystem.yaml`. Reversibility is a property of what you can reach, not of the idea.

@@ -19,13 +19,28 @@ Agents act on real systems. They open pull requests, send email, write files, mo
 
 ```bash
 git clone https://github.com/yahiakortam/controlZ && cd controlZ
-pip install -e .
+pip install -e '.[mcp]'
 
 cz watch --demo          # watch an agent make 15 mistakes, then press R to rewind
-python examples/rogue_agent.py   # the same story, without the TUI
 ```
 
-Both run entirely in memory. No GitHub token, no network, nothing to clean up.
+That runs entirely in memory — no token, no network, nothing to clean up.
+
+To put it in front of a tool your own agent uses:
+
+```bash
+cz connect github                    # or: cz connect filesystem ~/project
+# restart your agent, then let it work
+
+cz status                            # what it did, and how much is recoverable
+cz rollback ~/.controlz/github.json  # put it back
+```
+
+`cz connect` writes the configuration for Claude Code or Claude Desktop, checks
+the spec against the real server first, and records to `~/.controlz/`. There is
+no path to remember and no nested command to compose.
+
+Or use it as a library:
 
 ```python
 from controlz import Ledger, Session, Tracker
@@ -150,9 +165,15 @@ uses:
 ```
 
 ```bash
-pip install -e '.[mcp]'      # not on PyPI yet; see Quickstart
-cz proxy --spec examples/mcp-github.yaml --ledger run.json \
-    -- npx -y @modelcontextprotocol/server-github
+cz connect github        # writes your agent's config, checks the spec first
+cz connect filesystem ~/project
+cz connect --list        # what ControlZ ships specs for
+```
+
+Under that is an ordinary command you can run yourself:
+
+```bash
+cz proxy --spec github --ledger run.json -- npx -y @modelcontextprotocol/server-github
 ```
 
 Point your agent's MCP configuration at that command instead of the server's,
@@ -164,10 +185,11 @@ tool call is recorded, classified, and gated on the way through.
 This inverts the integration problem. A Python integration teaches ControlZ one
 API; a proxy wraps the protocol once and works with any MCP server there is.
 
-Two verified specs ship with it — [`examples/mcp-filesystem.yaml`](examples/mcp-filesystem.yaml)
-and [`examples/mcp-github.yaml`](examples/mcp-github.yaml). The filesystem one is
-probably where to start: writing files is the most common thing an agent does
-that people want back.
+Two verified specs ship inside the package —
+[`filesystem`](src/controlz/specs/filesystem.yaml) and
+[`github`](src/controlz/specs/github.yaml) — so they are names, not paths. The
+filesystem one is probably where to start: writing files is the most common
+thing an agent does that people want back.
 
 ### It still refuses to guess
 
@@ -199,7 +221,7 @@ ran.
 **Check the spec against the real server before trusting it:**
 
 ```bash
-cz proxy --spec examples/mcp-github.yaml --check -- npx -y @modelcontextprotocol/server-github
+cz proxy --spec github --check -- npx -y @modelcontextprotocol/server-github
 ```
 
 Tool names differ between MCP servers, and naming one that does not exist is the
@@ -302,9 +324,14 @@ Actions stream in as the agent works. Select a row and the right pane diffs exac
 Other commands:
 
 ```bash
-cz score run.json        # blast-radius readout for a recorded session
+cz status                # every session, and how much of each is recoverable
+cz score run.json        # blast-radius readout for one session
 cz rollback run.json     # rewind from the terminal (--dry-run, --force)
 ```
+
+A ledger recorded through the proxy remembers how it was recorded, so
+`cz rollback` reconnects to the right server on its own — months later, with
+nothing but the file.
 
 ## What it does not do
 

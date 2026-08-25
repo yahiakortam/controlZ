@@ -64,6 +64,22 @@ class ControlZProxy:
         self.tracker = Tracker(self.ledger, [self.integration], policy=policy, approve=approve)
         self.name = name or f"controlz({self.spec.tool})"
 
+    def record_provenance(self, spec: str, command: list[str]) -> None:
+        """Note in the ledger how this session was recorded, so it can be undone later.
+
+        A ledger outlives the process that wrote it, and undoing an MCP session
+        means relaunching the server it was recorded against. Storing that here
+        is what lets `cz rollback run.json` work months later with no arguments
+        beyond the file.
+
+        Credentials are deliberately not stored. The command is, and it comes
+        from the same configuration that launched the proxy in the first place.
+        """
+        self.ledger.session.metadata = {
+            **self.ledger.session.metadata,
+            "controlz": {"kind": "mcp", "spec": spec, "command": list(command)},
+        }
+
     # -- the two handlers ---------------------------------------------------
 
     async def list_tools(self, _ctx: Any = None, _params: Any = None) -> types.ListToolsResult:

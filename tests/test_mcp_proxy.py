@@ -671,25 +671,21 @@ if __name__ == "__main__":
         assert reloaded.actions[0].reversibility is Reversibility.COMPENSATABLE
 
 
-class TestShippedExampleSpec:
+class TestShippedGitHubSpec:
     """The example that ships must parse and mean what it says."""
 
     def test_it_parses(self):
-        from pathlib import Path
+        from controlz.specs import load
 
-        spec = ServerSpec.from_yaml(
-            Path(__file__).resolve().parents[1] / "examples" / "mcp-github.yaml"
-        )
+        spec = load("github")
         assert spec.tool == "github"
         assert spec.operations["create_issue"].reversibility is Reversibility.COMPENSATABLE
         assert spec.operations["merge_pull_request"].reversibility is Reversibility.IRREVERSIBLE
 
     def test_only_the_operation_with_a_read_tool_claims_full_reversibility(self):
-        from pathlib import Path
+        from controlz.specs import load
 
-        spec = ServerSpec.from_yaml(
-            Path(__file__).resolve().parents[1] / "examples" / "mcp-github.yaml"
-        )
+        spec = load("github")
         for name, operation in spec.operations.items():
             if operation.reversibility is Reversibility.REVERSIBLE:
                 assert operation.read is not None, (
@@ -892,31 +888,25 @@ class TestUnresolvedPlaceholders:
 
 class TestShippedFilesystemSpec:
     def test_it_parses(self):
-        from pathlib import Path
+        from controlz.specs import load
 
-        spec = ServerSpec.from_yaml(
-            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
-        )
+        spec = load("filesystem")
         assert spec.tool == "filesystem"
         assert set(spec.operations) == {"write_file", "edit_file", "move_file"}
 
     def test_write_file_is_not_claimed_fully_reversible(self):
         """This server has no delete tool, so a created file cannot be removed."""
-        from pathlib import Path
+        from controlz.specs import load
 
-        spec = ServerSpec.from_yaml(
-            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
-        )
+        spec = load("filesystem")
         assert spec.operations["write_file"].reversibility is Reversibility.COMPENSATABLE
         assert "no way to delete" in spec.operations["write_file"].undo.notes
 
     def test_every_reversible_operation_can_read_prior_state(self):
         """Except move_file, which is its own inverse and needs no prior state."""
-        from pathlib import Path
+        from controlz.specs import load
 
-        spec = ServerSpec.from_yaml(
-            Path(__file__).resolve().parents[1] / "examples" / "mcp-filesystem.yaml"
-        )
+        spec = load("filesystem")
         for name, operation in spec.operations.items():
             if operation.reversibility is not Reversibility.REVERSIBLE:
                 continue

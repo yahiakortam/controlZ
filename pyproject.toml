@@ -53,6 +53,11 @@ Issues = "https://github.com/yahiakortam/controlZ/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/controlz"]
+# The bundled specs are data, not code, so they need saying explicitly.
+artifacts = ["src/controlz/specs/*.yaml"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "LICENSE", "LIMITATIONS.md"]
 
 [tool.ruff]
 line-length = 100

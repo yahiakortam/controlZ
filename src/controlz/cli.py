@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from controlz import __version__
+from controlz.connect import CLIENTS
 
 __all__ = ["main"]
 
@@ -42,6 +43,48 @@ def _build_parser() -> argparse.ArgumentParser:
     score = sub.add_parser("score", help="print the blast radius of a recorded session")
     score.add_argument("ledger", type=Path)
 
+    connect = sub.add_parser(
+        "connect",
+        help="wire ControlZ in front of a server, for your agent",
+        description=(
+            "Put ControlZ between your agent and a tool server, and write the "
+            "configuration your agent needs. Checks the spec against the real "
+            "server before changing anything."
+        ),
+    )
+    connect.add_argument("server", nargs="?", help="which server (see: cz connect --list)")
+    connect.add_argument(
+        "path", nargs="?", help="for servers that take one, the directory to confine it to"
+    )
+    connect.add_argument("--list", action="store_true", help="list the servers ControlZ knows")
+    connect.add_argument(
+        "--client",
+        choices=list(CLIENTS),
+        help="which agent to configure (default: whichever is detected)",
+    )
+    connect.add_argument("--policy", type=Path, help="a YAML policy to enforce on every call")
+    connect.add_argument("--ledger", type=Path, help="where to record (default: ~/.controlz)")
+    connect.add_argument(
+        "-e",
+        dest="env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="an environment variable the server needs",
+    )
+    connect.add_argument(
+        "--scope",
+        default="user",
+        choices=["user", "project", "local"],
+        help="Claude Code config scope (default: user)",
+    )
+    connect.add_argument("--name", help="what to call it in the config")
+
+    sub.add_parser(
+        "status",
+        help="what is connected, and what it has recorded",
+    )
+
     proxy = sub.add_parser(
         "proxy",
         help="record and gate another MCP server",
@@ -53,7 +96,10 @@ def _build_parser() -> argparse.ArgumentParser:
     proxy.add_argument(
         "--spec",
         type=Path,
-        help="YAML describing the upstream's operations (without it, nothing is undoable)",
+        help=(
+            "a bundled spec name (github, filesystem) or a path to YAML. "
+            "Without one, nothing is undoable."
+        ),
     )
     proxy.add_argument("--ledger", type=Path, help="where to record the session")
     proxy.add_argument(
@@ -134,6 +180,39 @@ def _score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rollback_over_mcp(args: argparse.Namespace, ledger, provenance: dict) -> int:
+    """Roll back a session that was recorded through the proxy.
+
+    Relaunches the server it was recorded against, using the command the ledger
+    remembers, and undoes through the same spec.
+    """
+    import asyncio
+
+    from mcp import Client, StdioServerParameters
+    from rich.console import Console
+
+    from controlz.mcp import ControlZProxy
+    from controlz.specs import load as load_spec
+
+    console = Console()
+    command = provenance.get("command") or []
+    if not command:
+        raise SystemExit("this ledger does not record how to reach its server")
+
+    spec = load_spec(provenance.get("spec") or "")
+    console.print(f"[dim]reconnecting to {' '.join(command[:3])}…[/dim]")
+
+    async def run() -> int:
+        upstream = StdioServerParameters(command=command[0], args=command[1:], env=dict(os.environ))
+        async with Client(upstream) as session:
+            proxy = ControlZProxy(session, spec=spec, ledger=ledger)
+            report = await proxy.tracker.arollback(dry_run=args.dry_run, force=bool(args.force))
+            console.print(report.summary())
+            return 0 if report.complete else 1
+
+    return asyncio.run(run())
+
+
 def _rollback(args: argparse.Namespace) -> int:
     from rich.console import Console
 
@@ -142,10 +221,113 @@ def _rollback(args: argparse.Namespace) -> int:
 
     console = Console()
     ledger = Ledger.load(args.ledger)
+
+    provenance = (ledger.session.metadata or {}).get("controlz") or {}
+    if provenance.get("kind") == "mcp":
+        return _rollback_over_mcp(args, ledger, provenance)
+
     engine = RollbackEngine(ledger.session, [_github_integration()])
     report = engine.run(dry_run=args.dry_run, force=bool(args.force))
     console.print(report.summary())
     return 0 if report.complete else 1
+
+
+def _connect(args: argparse.Namespace) -> int:
+    from rich.console import Console
+
+    from controlz.connect import connect
+    from controlz.specs import SERVERS
+
+    console = Console()
+
+    if args.list or not args.server:
+        console.print("[bold]servers ControlZ ships a spec for[/bold]\n")
+        for name, server in sorted(SERVERS.items()):
+            extra = " [dim](takes a directory)[/dim]" if server.takes_path else ""
+            console.print(f"  [bold]{name}[/bold]{extra}  —  {server.description}")
+            for key, what in server.needs.items():
+                console.print(f"      [dim]needs {key}: {what}[/dim]")
+        console.print("\n[dim]cz connect github        cz connect filesystem ~/project[/dim]")
+        return 0
+
+    env = {}
+    for pair in args.env:
+        key, _, value = pair.partition("=")
+        if not value:
+            raise SystemExit(f"-e expects KEY=VALUE, got {pair!r}")
+        env[key] = value
+
+    result = connect(
+        args.server,
+        client=args.client,
+        path=args.path,
+        policy=args.policy,
+        ledger=args.ledger,
+        env=env,
+        scope=args.scope,
+        server_name=args.name,
+    )
+
+    if result["client"] == "print":
+        console.print("[bold]add this to your agent's MCP configuration:[/bold]\n")
+        console.print(result["snippet"])
+    else:
+        console.print(f"[green]connected[/green] {result['name']} → {result['written']}")
+
+    console.print(f"\nrecording to [bold]{result['ledger']}[/bold]")
+    console.print("[yellow]restart your agent for it to pick this up.[/yellow]")
+    console.print("\nthen:")
+    console.print("  [dim]cz status[/dim]                       what it has recorded")
+    console.print(f"  [dim]cz watch {result['ledger']}[/dim]    watch it live")
+    console.print(f"  [dim]cz rollback {result['ledger']}[/dim] put things back")
+    return 0
+
+
+def _status(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.table import Table
+
+    from controlz.connect import LEDGER_HOME
+    from controlz.ledger import Ledger
+    from controlz.score import reversibility_score
+
+    console = Console()
+    ledgers = sorted(LEDGER_HOME.glob("*.json")) if LEDGER_HOME.exists() else []
+    if not ledgers:
+        console.print(f"[dim]nothing recorded yet ({LEDGER_HOME} is empty)[/dim]")
+        console.print("\nconnect something with: [bold]cz connect[/bold]")
+        return 0
+
+    table = Table(title=f"ControlZ — {LEDGER_HOME}", expand=True)
+    table.add_column("ledger")
+    table.add_column("actions", justify="right")
+    table.add_column("recoverable", justify="right")
+    table.add_column("cannot be undone", overflow="fold")
+
+    unrecoverable_total = 0
+    for path in ledgers:
+        try:
+            ledger = Ledger.load(path)
+        except Exception as exc:
+            table.add_row(path.stem, "—", "—", f"[red]unreadable: {exc}[/red]")
+            continue
+        score = reversibility_score(ledger.actions)
+        unrecoverable = score.blast_radius.unrecoverable
+        unrecoverable_total += len(unrecoverable)
+        style = "green" if score.coverage >= 90 else "yellow" if score.coverage >= 50 else "red"
+        table.add_row(
+            path.stem,
+            str(score.total),
+            f"[{style}]{score.coverage}%[/{style}]",
+            ", ".join(i.api_call for i in unrecoverable) or "[dim]—[/dim]",
+        )
+    console.print(table)
+    if unrecoverable_total:
+        console.print(
+            f"[yellow]{unrecoverable_total} action(s) cannot be taken back.[/yellow] "
+            "[dim]cz score <ledger> for detail[/dim]"
+        )
+    return 0
 
 
 def _proxy(args: argparse.Namespace) -> int:
@@ -168,11 +350,13 @@ def _proxy(args: argparse.Namespace) -> int:
             "e.g. cz proxy --spec notes.yaml -- npx -y some-mcp-server"
         )
 
+    from controlz.specs import load as load_spec
+
     try:
-        spec = ServerSpec.from_yaml(args.spec) if args.spec else ServerSpec.unconfigured()
+        spec = load_spec(args.spec) if args.spec else ServerSpec.unconfigured()
         policy = Policy.from_yaml(args.policy) if args.policy else None
     except FileNotFoundError as missing:
-        raise SystemExit(f"no such file: {missing.filename}") from None
+        raise SystemExit(str(missing) if missing.args else f"no such file: {missing}") from None
     ledger = (
         Ledger(
             Session(agent="mcp-proxy", description=f"proxied {spec.tool}"),
@@ -184,9 +368,15 @@ def _proxy(args: argparse.Namespace) -> int:
     )
 
     async def run() -> int:
-        upstream = StdioServerParameters(command=command[0], args=command[1:])
+        # Pass our environment through. Without the proxy the agent would have
+        # launched this server itself, with exactly this environment — so
+        # anything less breaks every server that needs a credential, and the
+        # proxy would be changing behaviour rather than observing it.
+        upstream = StdioServerParameters(command=command[0], args=command[1:], env=dict(os.environ))
         async with Client(upstream) as session:
             proxy = ControlZProxy(session, spec=spec, ledger=ledger, policy=policy)
+            if args.spec:
+                proxy.record_provenance(str(args.spec), command)
             if args.check:
                 problems = await proxy.check_spec()
                 for problem in problems:
@@ -209,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     handlers = {
+        "connect": _connect,
+        "status": _status,
         "watch": _watch,
         "score": _score,
         "rollback": _rollback,
