@@ -1,0 +1,73 @@
+# What ControlZ knows about the GitHub MCP server.
+#
+#   cz proxy --spec examples/mcp-github.yaml -- npx -y @modelcontextprotocol/server-github
+#
+# Everything here is a hand-written judgement, exactly as it is for a Python
+# integration. Nothing is inferred, and a tool that is not listed stays UNKNOWN
+# — recorded faithfully, refused by the default policy, and never guessed at.
+#
+# Tool names vary between MCP servers. Run the server and read its tool list
+# before trusting this file; a wrong name means a rollback that does nothing.
+
+tool: github
+
+operations:
+  # ---------------------------------------------------------------- issues
+  create_issue:
+    # Closing is the best available undo: GitHub cannot delete issues over the
+    # REST API, and subscribers were emailed the moment it opened.
+    reversibility: compensatable
+    undo:
+      tool: update_issue
+      args:
+        owner: "$args.owner"
+        repo: "$args.repo"
+        issue_number: "$result.number"
+        state: closed
+      description: Close the issue this action opened.
+      notes: >-
+        Closing is a compensation, not an undo. The issue remains visible and
+        the notifications have already gone out.
+
+  update_issue:
+    # Reversible only because a read tool is declared: without one the previous
+    # values are unknowable and the undo would restore the wrong thing.
+    reversibility: reversible
+    read:
+      tool: get_issue
+      args:
+        owner: "$args.owner"
+        repo: "$args.repo"
+        issue_number: "$args.issue_number"
+    undo:
+      tool: update_issue
+      args:
+        owner: "$args.owner"
+        repo: "$args.repo"
+        issue_number: "$args.issue_number"
+        title: "$before.title"
+        body: "$before.body"
+        state: "$before.state"
+    conflict_fields: [title, body, state]
+
+  # -------------------------------------------------------------- comments
+  add_issue_comment:
+    reversibility: compensatable
+    undo:
+      tool: delete_issue_comment
+      args:
+        owner: "$args.owner"
+        repo: "$args.repo"
+        comment_id: "$result.id"
+      notes: Deleting does not un-send the notification subscribers received.
+
+  # ------------------------------------------------------- not undoable
+  # Listed so the classification is explicit rather than absent. A merge can be
+  # reverted with a new commit, but the history is public and CI has already
+  # run, so this is not something ControlZ should offer to take back.
+  merge_pull_request:
+    reversibility: irreversible
+
+  # Everything else the server exposes — searches, reads, forks, releases —
+  # is deliberately absent. Absent means UNKNOWN, which the default policy
+  # refuses. Add an entry only once you have decided what its undo really is.

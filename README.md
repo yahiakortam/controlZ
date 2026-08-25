@@ -139,6 +139,81 @@ Three rules govern a rollback:
 - **Never overwrite a surprise.** The live state is re-read and compared before restoring anything. If someone else edited the field being restored, the action is marked `CONFLICT` and left alone until a human confirms. If the state cannot be read at all, that counts as drift too — an unreadable target is not a green light.
 - **Say what happened.** Every action appears in the report exactly once. `report.complete` means nothing is left to act on; `report.fully_restored` means everything actually came back. A session with one irreversible action is the first but not the second, and blurring those together is the dishonesty this whole layer exists to prevent.
 
+## Drop it in front of an MCP server
+
+The way to use ControlZ without changing a line of your agent. Instead of
+rewriting call sites, put ControlZ between the agent and the tools it already
+uses:
+
+```
+   agent ──MCP──▶ ControlZ ──MCP──▶ the real server
+```
+
+```bash
+pip install 'controlz[mcp]'
+cz proxy --spec examples/mcp-github.yaml --ledger run.json \
+    -- npx -y @modelcontextprotocol/server-github
+```
+
+Point your agent's MCP configuration at that command instead of the server's,
+and it sees **exactly the same tools** — names, descriptions, and schemas
+forwarded verbatim, because a safety layer that changes behaviour is a
+liability. Every call it makes is recorded, classified, and gated on the way
+through.
+
+This inverts the integration problem. A Python integration teaches ControlZ one
+API; a proxy wraps the protocol once and works with any MCP server there is.
+
+### It still refuses to guess
+
+An arbitrary tool is `UNKNOWN`, and `UNKNOWN` is treated as potentially
+irreversible. **An unconfigured proxy records everything faithfully and undoes
+nothing** — which is the honest default, not a bug. You tell it what is
+reversible, in YAML:
+
+```yaml
+tool: notes
+operations:
+  create_note:
+    reversibility: compensatable
+    undo: {tool: delete_note, args: {note_id: "$result.id"}}
+
+  rename_note:
+    reversibility: reversible
+    read: {tool: get_note, args: {note_id: "$args.note_id"}}   # ← the important line
+    undo:
+      tool: rename_note
+      args: {note_id: "$args.note_id", title: "$before.title"}
+    conflict_fields: [title]
+```
+
+Placeholders draw from three places: `$args.x` from the original call,
+`$result.x` from what it returned, and `$before.x` from state read *before* it
+ran.
+
+**`read` is what makes the difference between a toy and a rollback layer.** A
+protocol only offers "call this tool" — there is no generic way to ask what a
+tool is about to change. Without a declared read tool, ControlZ can undo a
+*creation* (delete the thing it made) but can never restore a *previous value*,
+because it never knew it. It also cannot detect a conflict, and says so in the
+plan's notes rather than implying safety it does not have.
+
+With one declared, the proxy gets the same conflict refusal as a hand-written
+integration: it re-reads before restoring, and leaves a human's edit alone.
+
+### The gate applies here too
+
+A blocked call never reaches the real server. It comes back to the agent as a
+tool error explaining why — so the agent can respond to the refusal instead of
+seeing a broken connection:
+
+```
+ControlZ refused this call.
+
+block — reversibility score 0.0% over 1 actions
+  [block] on_irreversible: 1 irreversible action(s): github.send_email
+```
+
 ## Async
 
 Agent frameworks are async, so ControlZ is too. Every method that touches the
@@ -224,6 +299,7 @@ cz rollback run.json     # rewind from the terminal (--dry-run, --force)
 | --- | --- |
 | **GitHub** | `create_issue`, `update_issue`, `add_labels`, `remove_labels`, `close_issue`, `reopen_issue`, `create_comment`, `delete_comment` |
 | **In-memory GitHub** | the same surface, no credentials — for demos and tests |
+| **Any MCP server** | proxied and recorded; undo declared in YAML — see above |
 
 Adding another is a single class with five methods: see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-integration). Slack ([#1](https://github.com/yahiakortam/controlZ/issues/1)) and HubSpot ([#2](https://github.com/yahiakortam/controlZ/issues/2)) are open as good first issues.
 

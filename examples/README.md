@@ -50,3 +50,18 @@ cz watch --demo
 ```
 
 The same chaos agent, streaming into the TUI. Press `R` to rewind.
+
+## `mcp-github.yaml` — teaching the proxy about a real MCP server
+
+```bash
+pip install 'controlz[mcp]'
+cz proxy --spec examples/mcp-github.yaml --ledger run.json \
+    -- npx -y @modelcontextprotocol/server-github
+```
+
+Point your agent's MCP config at that command instead of the server's. It sees
+the same tools; ControlZ records and gates every call on the way through.
+
+The file is worth reading even if you use a different server — it shows what
+each classification is claiming, and why `read` is the line that decides whether
+a previous value can be restored at all.

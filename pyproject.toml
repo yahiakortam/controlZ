@@ -31,10 +31,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The MCP proxy is opt-in: it is a large dependency and most users of the
+# library never need it.
+mcp = [
+    "mcp>=2.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "mcp>=2.0",
 ]
 
 [project.scripts]

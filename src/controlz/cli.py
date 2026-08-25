@@ -42,6 +42,27 @@ def _build_parser() -> argparse.ArgumentParser:
     score = sub.add_parser("score", help="print the blast radius of a recorded session")
     score.add_argument("ledger", type=Path)
 
+    proxy = sub.add_parser(
+        "proxy",
+        help="record and gate another MCP server",
+        description=(
+            "Sit between an agent and an MCP server. The agent sees the same tools; "
+            "every call it makes is recorded, classified, and gated on the way through."
+        ),
+    )
+    proxy.add_argument(
+        "--spec",
+        type=Path,
+        help="YAML describing the upstream's operations (without it, nothing is undoable)",
+    )
+    proxy.add_argument("--ledger", type=Path, help="where to record the session")
+    proxy.add_argument("--policy", type=Path, help="a YAML policy to enforce on every call")
+    proxy.add_argument(
+        "upstream",
+        nargs=argparse.REMAINDER,
+        help="the upstream server to launch, after --  (e.g. -- npx -y some-mcp-server)",
+    )
+
     rollback = sub.add_parser("rollback", help="rewind a recorded session")
     rollback.add_argument("ledger", type=Path)
     rollback.add_argument(
@@ -122,13 +143,64 @@ def _rollback(args: argparse.Namespace) -> int:
     return 0 if report.complete else 1
 
 
+def _proxy(args: argparse.Namespace) -> int:
+    import asyncio
+
+    try:
+        from mcp import Client, StdioServerParameters
+    except ImportError:  # pragma: no cover - depends on what is installed
+        raise SystemExit(
+            "the MCP proxy needs the mcp package: pip install 'controlz[mcp]'"
+        ) from None
+
+    from controlz.ledger import Ledger
+    from controlz.mcp import ControlZProxy, ServerSpec
+    from controlz.models import Session
+    from controlz.policy import Policy
+
+    command = [part for part in args.upstream if part != "--"]
+    if not command:
+        raise SystemExit(
+            "give the upstream server to launch after --, "
+            "e.g. cz proxy --spec notes.yaml -- npx -y some-mcp-server"
+        )
+
+    try:
+        spec = ServerSpec.from_yaml(args.spec) if args.spec else ServerSpec.unconfigured()
+        policy = Policy.from_yaml(args.policy) if args.policy else None
+    except FileNotFoundError as missing:
+        raise SystemExit(f"no such file: {missing.filename}") from None
+    ledger = (
+        Ledger(
+            Session(agent="mcp-proxy", description=f"proxied {spec.tool}"),
+            path=args.ledger,
+            autosave=True,
+        )
+        if args.ledger
+        else None
+    )
+
+    async def run() -> None:
+        upstream = StdioServerParameters(command=command[0], args=command[1:])
+        async with Client(upstream) as session:
+            await ControlZProxy(session, spec=spec, ledger=ledger, policy=policy).serve_stdio()
+
+    asyncio.run(run())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         return 0
-    handlers = {"watch": _watch, "score": _score, "rollback": _rollback}
+    handlers = {
+        "watch": _watch,
+        "score": _score,
+        "rollback": _rollback,
+        "proxy": _proxy,
+    }
     return handlers[args.command](args)
 
 

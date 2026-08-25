@@ -10,6 +10,7 @@ Where ControlZ is going, and where to start if you want to help.
 - **Rollback** — reverse dependency order, conflict detection that refuses to overwrite drift, and a report that accounts for every action exactly once
 - **Reversibility score and policy gate** — weighted coverage, blast radius, and allow / require-approval / block from YAML
 - **The watch window** — live feed, before/after diff, and the rewind
+- **MCP proxy** — sit in front of any MCP server, recording and gating every call, with reversibility declared in YAML rather than Python
 - **Async core** — awaitable twins for everything that touches the network, with existing sync integrations working unchanged via thread offload
 
 ## Next
@@ -24,9 +25,14 @@ Also wanted: Linear, Jira, Notion, Google Calendar, the filesystem, S3.
 
 Every classification today is hand-written. That is the right default — it is auditable and it never guesses — but it does not scale to hundreds of endpoints. Whether a machine can propose classifications that a human then approves is an open question, and a genuinely interesting one. Written up below.
 
-### An MCP proxy
+### Growing the MCP proxy
 
-The way most agents reach their tools now. A ControlZ server that sits in front of any other MCP server — presenting the same tool list, forwarding each call, recording and classifying it — would make ControlZ a config change rather than a rewrite. It inverts the integration problem: wrap a protocol once instead of writing Python per tool. The open question is classification, since an arbitrary MCP tool is `UNKNOWN` and the default policy refuses it; declarative per-server classification is the likely answer.
+The proxy ships, but it is new and the edges show:
+
+- **A spec registry.** Every user of the GitHub MCP server writes the same YAML. These belong in a shared, reviewable collection rather than in everyone's home directory.
+- **Resources and prompts.** The proxy forwards `tools/list` and `tools/call`. An MCP server can also expose resources and prompts, which pass through untouched today because they are not forwarded at all.
+- **Verifying the undo.** A declared undo is trusted to do what it claims. Re-reading after a rollback and confirming the state actually matches would turn `RESTORED` from "the plan ran" into something stronger.
+- **Multiple upstreams.** One proxy in front of several servers, so a session spanning GitHub and Slack unwinds in the right order across both.
 
 ### Beyond the current design
 
