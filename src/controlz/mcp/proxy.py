@@ -119,6 +119,38 @@ class ControlZProxy:
         value = (params.arguments or {}).get(spec.intent_arg)
         return str(value) if value is not None else None
 
+    # -- checking -----------------------------------------------------------
+
+    async def check_spec(self) -> list[str]:
+        """Compare the spec against the tools the upstream really advertises."""
+        upstream = await self.session.list_tools()
+        return self.spec.check_against({tool.name for tool in upstream.tools})
+
+    async def warn_about_spec(self) -> list[str]:
+        """Check the spec and report any problems on stderr.
+
+        Deliberately stderr: stdout carries the protocol, and writing anything
+        else there would corrupt the stream. Deliberately a warning rather than
+        a refusal: a partly wrong spec still records faithfully, and refusing to
+        start would take away the recording too.
+        """
+        import sys
+
+        try:
+            problems = await self.check_spec()
+        except Exception as exc:  # pragma: no cover - upstream may not list tools
+            print(f"controlz: could not check the spec: {exc}", file=sys.stderr)
+            return []
+        for problem in problems:
+            print(f"controlz: {problem}", file=sys.stderr)
+        if problems:
+            print(
+                "controlz: rollbacks using those tools will fail. "
+                "Check the server's tool list and fix the spec.",
+                file=sys.stderr,
+            )
+        return problems
+
     # -- serving ------------------------------------------------------------
 
     def build_server(self) -> LowLevelServer:
@@ -137,6 +169,7 @@ class ControlZProxy:
         """Run the proxy over stdio, the way an MCP client launches a server."""
         from mcp.server.stdio import stdio_server
 
+        await self.warn_about_spec()
         server = self.build_server()
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

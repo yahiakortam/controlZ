@@ -150,7 +150,7 @@ uses:
 ```
 
 ```bash
-pip install 'controlz[mcp]'
+pip install -e '.[mcp]'      # not on PyPI yet; see Quickstart
 cz proxy --spec examples/mcp-github.yaml --ledger run.json \
     -- npx -y @modelcontextprotocol/server-github
 ```
@@ -190,6 +190,18 @@ operations:
 Placeholders draw from three places: `$args.x` from the original call,
 `$result.x` from what it returned, and `$before.x` from state read *before* it
 ran.
+
+**Check the spec against the real server before trusting it:**
+
+```bash
+cz proxy --spec examples/mcp-github.yaml --check -- npx -y @modelcontextprotocol/server-github
+```
+
+Tool names differ between MCP servers, and naming one that does not exist is the
+worst failure this design allows: the classification promises recovery, the
+score counts it, and nothing goes wrong until someone actually needs the undo.
+`--check` compares every tool the spec names against the server's real list and
+exits nonzero if any are missing. The proxy also warns on stderr at startup.
 
 **`read` is what makes the difference between a toy and a rollback layer.** A
 protocol only offers "call this tool" — there is no generic way to ask what a

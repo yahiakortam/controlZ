@@ -148,6 +148,32 @@ class ServerSpec(BaseModel):
     tool: str = Field(default="mcp", description="Name recorded as Action.tool.")
     operations: dict[str, OperationSpec] = Field(default_factory=dict)
 
+    def referenced_tools(self) -> dict[str, list[str]]:
+        """Every upstream tool this spec names, and what each is used for."""
+        referenced: dict[str, list[str]] = {}
+        for name, operation in self.operations.items():
+            referenced.setdefault(name, []).append("operation")
+            if operation.read is not None:
+                referenced.setdefault(operation.read.tool, []).append(f"read for {name}")
+            if operation.undo is not None:
+                referenced.setdefault(operation.undo.tool, []).append(f"undo for {name}")
+        return referenced
+
+    def check_against(self, available: set[str] | list[str]) -> list[str]:
+        """Report tools this spec names that the server does not actually have.
+
+        A misspelt or absent undo tool is the worst kind of bug here: the
+        classification claims the action is recoverable, the score counts it as
+        recoverable, and the failure only appears when someone tries to roll
+        back — the moment they can least afford a surprise.
+        """
+        available = set(available)
+        problems = []
+        for tool, uses in sorted(self.referenced_tools().items()):
+            if tool not in available:
+                problems.append(f"{tool!r} is not a tool on this server ({', '.join(uses)})")
+        return problems
+
     @classmethod
     def from_yaml(cls, path: str | os.PathLike[str]) -> ServerSpec:
         import yaml

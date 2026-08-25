@@ -56,6 +56,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="YAML describing the upstream's operations (without it, nothing is undoable)",
     )
     proxy.add_argument("--ledger", type=Path, help="where to record the session")
+    proxy.add_argument(
+        "--check",
+        action="store_true",
+        help="check the spec against the server's real tool list, then exit",
+    )
     proxy.add_argument("--policy", type=Path, help="a YAML policy to enforce on every call")
     proxy.add_argument(
         "upstream",
@@ -149,9 +154,7 @@ def _proxy(args: argparse.Namespace) -> int:
     try:
         from mcp import Client, StdioServerParameters
     except ImportError:  # pragma: no cover - depends on what is installed
-        raise SystemExit(
-            "the MCP proxy needs the mcp package: pip install 'controlz[mcp]'"
-        ) from None
+        raise SystemExit("the MCP proxy needs the mcp package: pip install -e '.[mcp]'") from None
 
     from controlz.ledger import Ledger
     from controlz.mcp import ControlZProxy, ServerSpec
@@ -180,13 +183,23 @@ def _proxy(args: argparse.Namespace) -> int:
         else None
     )
 
-    async def run() -> None:
+    async def run() -> int:
         upstream = StdioServerParameters(command=command[0], args=command[1:])
         async with Client(upstream) as session:
-            await ControlZProxy(session, spec=spec, ledger=ledger, policy=policy).serve_stdio()
+            proxy = ControlZProxy(session, spec=spec, ledger=ledger, policy=policy)
+            if args.check:
+                problems = await proxy.check_spec()
+                for problem in problems:
+                    print(f"  {problem}")
+                if problems:
+                    print(f"\n{len(problems)} problem(s): rollbacks using those tools will fail.")
+                    return 1
+                print(f"spec matches the server: {len(spec.operations)} operations checked")
+                return 0
+            await proxy.serve_stdio()
+        return 0
 
-    asyncio.run(run())
-    return 0
+    return asyncio.run(run())
 
 
 def main(argv: list[str] | None = None) -> int:

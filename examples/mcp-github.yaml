@@ -1,13 +1,20 @@
 # What ControlZ knows about the GitHub MCP server.
 #
-#   cz proxy --spec examples/mcp-github.yaml -- npx -y @modelcontextprotocol/server-github
+#   cz proxy --spec examples/mcp-github.yaml --check \
+#       -- npx -y @modelcontextprotocol/server-github
 #
-# Everything here is a hand-written judgement, exactly as it is for a Python
+# Run that --check first, always. Tool names differ between MCP servers, and a
+# name that does not exist means a rollback that quietly does nothing — the
+# classification promises recovery, the score counts it, and the failure only
+# shows up when someone actually needs the undo.
+#
+# Verified against @modelcontextprotocol/server-github (2025.4.8, npm), which
+# advertises 26 tools. That package is marked deprecated upstream; a different
+# GitHub MCP server will need a different file.
+#
+# Everything below is a hand-written judgement, exactly as it is for a Python
 # integration. Nothing is inferred, and a tool that is not listed stays UNKNOWN
 # — recorded faithfully, refused by the default policy, and never guessed at.
-#
-# Tool names vary between MCP servers. Run the server and read its tool list
-# before trusting this file; a wrong name means a rollback that does nothing.
 
 tool: github
 
@@ -50,17 +57,6 @@ operations:
         state: "$before.state"
     conflict_fields: [title, body, state]
 
-  # -------------------------------------------------------------- comments
-  add_issue_comment:
-    reversibility: compensatable
-    undo:
-      tool: delete_issue_comment
-      args:
-        owner: "$args.owner"
-        repo: "$args.repo"
-        comment_id: "$result.id"
-      notes: Deleting does not un-send the notification subscribers received.
-
   # ------------------------------------------------------- not undoable
   # Listed so the classification is explicit rather than absent. A merge can be
   # reverted with a new commit, but the history is public and CI has already
@@ -68,6 +64,23 @@ operations:
   merge_pull_request:
     reversibility: irreversible
 
-  # Everything else the server exposes — searches, reads, forks, releases —
-  # is deliberately absent. Absent means UNKNOWN, which the default policy
-  # refuses. Add an entry only once you have decided what its undo really is.
+# ---------------------------------------------------------------------------
+# Deliberately absent, and worth explaining:
+#
+#   add_issue_comment
+#     A comment is deletable through the GitHub REST API, so through a richer
+#     server this would be COMPENSATABLE with a delete_issue_comment undo. This
+#     server exposes no such tool, so ControlZ cannot take it back — and saying
+#     "compensatable" while having no way to compensate would be exactly the
+#     dishonesty this project exists to avoid. Left unlisted, it is UNKNOWN:
+#     recorded, refused by the default policy, and never claimed as recoverable.
+#
+#   create_repository, fork_repository, create_or_update_file, push_files,
+#   create_pull_request, create_branch, and the rest
+#     Unlisted for the ordinary reason: nobody has decided what their undo
+#     really is. Add an entry only once you have.
+#
+#   the read-only tools (get_*, list_*, search_*)
+#     Nothing to undo, so nothing to declare. They pass through recorded as
+#     UNKNOWN, which costs a policy prompt if you gate on unknowns — a fair
+#     trade for not maintaining a list of everything that is harmless.

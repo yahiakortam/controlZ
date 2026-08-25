@@ -54,7 +54,7 @@ The same chaos agent, streaming into the TUI. Press `R` to rewind.
 ## `mcp-github.yaml` — teaching the proxy about a real MCP server
 
 ```bash
-pip install 'controlz[mcp]'
+pip install -e '.[mcp]'      # not on PyPI yet; see Quickstart
 cz proxy --spec examples/mcp-github.yaml --ledger run.json \
     -- npx -y @modelcontextprotocol/server-github
 ```

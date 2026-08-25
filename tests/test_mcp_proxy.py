@@ -696,3 +696,79 @@ class TestShippedExampleSpec:
                     f"{name} claims REVERSIBLE without a read tool, so it cannot know "
                     "the value it would restore"
                 )
+
+
+class TestSpecChecking:
+    """A spec naming a tool the server does not have is the worst silent failure.
+
+    The classification promises recovery, the score counts it, and the failure
+    only appears when someone actually needs the undo.
+    """
+
+    def test_referenced_tools_are_collected(self):
+        referenced = SPEC.referenced_tools()
+
+        assert "create_note" in referenced
+        assert "delete_note" in referenced  # named only as an undo
+        assert "get_note" in referenced  # named only as a read
+        assert referenced["get_note"] == ["read for rename_note"]
+
+    def test_a_missing_tool_is_reported(self):
+        problems = SPEC.check_against({"create_note", "rename_note", "get_note"})
+
+        assert any("delete_note" in p for p in problems)
+        assert any("undo for create_note" in p for p in problems)
+
+    def test_a_complete_server_reports_nothing(self):
+        available = set(SPEC.referenced_tools()) | {"unarchive_note"}
+        assert SPEC.check_against(available) == []
+
+    async def test_the_proxy_checks_against_the_live_server(self, upstream):
+        client, proxy = await proxied(upstream)
+        try:
+            assert await proxy.check_spec() == []
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_a_wrong_spec_is_caught_against_the_live_server(self, upstream):
+        broken = ServerSpec.model_validate(
+            {
+                "tool": "notes",
+                "operations": {
+                    "create_note": {
+                        "reversibility": "compensatable",
+                        "undo": {"tool": "obliterate_note", "args": {}},
+                    }
+                },
+            }
+        )
+        client, proxy = await proxied(upstream, spec=broken)
+        try:
+            problems = await proxy.check_spec()
+            assert len(problems) == 1
+            assert "obliterate_note" in problems[0]
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_warnings_go_to_stderr_not_stdout(self, upstream, capsys):
+        """stdout carries the protocol; anything else there corrupts the stream."""
+        broken = ServerSpec.model_validate(
+            {
+                "tool": "notes",
+                "operations": {
+                    "create_note": {
+                        "reversibility": "compensatable",
+                        "undo": {"tool": "obliterate_note", "args": {}},
+                    }
+                },
+            }
+        )
+        client, proxy = await proxied(upstream, spec=broken)
+        try:
+            await proxy.warn_about_spec()
+            captured = capsys.readouterr()
+
+            assert "obliterate_note" in captured.err
+            assert captured.out == ""
+        finally:
+            await client.__aexit__(None, None, None)
