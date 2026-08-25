@@ -10,6 +10,7 @@ Where ControlZ is going, and where to start if you want to help.
 - **Rollback** — reverse dependency order, conflict detection that refuses to overwrite drift, and a report that accounts for every action exactly once
 - **Reversibility score and policy gate** — weighted coverage, blast radius, and allow / require-approval / block from YAML
 - **The watch window** — live feed, before/after diff, and the rewind
+- **Async core** — awaitable twins for everything that touches the network, with existing sync integrations working unchanged via thread offload
 
 ## Next
 
@@ -22,6 +23,10 @@ Also wanted: Linear, Jira, Notion, Google Calendar, the filesystem, S3.
 ### Auto-classification research
 
 Every classification today is hand-written. That is the right default — it is auditable and it never guesses — but it does not scale to hundreds of endpoints. Whether a machine can propose classifications that a human then approves is an open question, and a genuinely interesting one. Written up below.
+
+### An MCP proxy
+
+The way most agents reach their tools now. A ControlZ server that sits in front of any other MCP server — presenting the same tool list, forwarding each call, recording and classifying it — would make ControlZ a config change rather than a rewrite. It inverts the integration problem: wrap a protocol once instead of writing Python per tool. The open question is classification, since an arbitrary MCP tool is `UNKNOWN` and the default policy refuses it; declarative per-server classification is the likely answer.
 
 ### Beyond the current design
 

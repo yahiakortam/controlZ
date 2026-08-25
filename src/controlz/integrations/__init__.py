@@ -13,6 +13,7 @@ agent's call and record both sides of it.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
@@ -156,6 +157,62 @@ class Integration(ABC):
             raise IntegrationError(f"no rollback plan on action {action.operation_id}")
         for step in plan.steps:
             self.execute(Operation(tool=step.tool, api_call=step.api_call, args=step.args))
+
+    # -- the async interface ------------------------------------------------
+    #
+    # Every method here defaults to running its synchronous twin in a worker
+    # thread. That is not a fallback so much as the correct behaviour for the
+    # many SDKs that are blocking — PyGithub among them — because the point is
+    # to keep the event loop free, and a blocking call in a thread does that.
+    #
+    # An integration built on an async client should override these with real
+    # awaits and leave the sync versions to `asyncio.run`, or raise from them.
+    #
+    # `classify` and `build_rollback_plan` have no async twins on purpose: one
+    # is a dictionary lookup and the other is pure computation over state
+    # already in hand. Neither touches the network.
+
+    async def asnapshot(self, operation: Operation) -> dict[str, Any] | None:
+        """Async :meth:`snapshot`."""
+        return await asyncio.to_thread(self.snapshot, operation)
+
+    async def asnapshot_after(self, operation: Operation, result: Any) -> dict[str, Any] | None:
+        """Async :meth:`snapshot_after`.
+
+        Note that this offloads the *synchronous* :meth:`snapshot_after`, which
+        in turn calls the synchronous :meth:`snapshot`. That is right for a
+        blocking SDK, but it means a natively async integration must override
+        this alongside :meth:`asnapshot` — overriding only the latter would
+        leave the blocking path in use for the after-state. The default cannot
+        simply delegate to :meth:`asnapshot`, because integrations override
+        ``snapshot_after`` precisely to read identifiers off ``result`` for
+        operations that create the thing they touch.
+        """
+        return await asyncio.to_thread(self.snapshot_after, operation, result)
+
+    async def aexecute(self, operation: Operation) -> Any:
+        """Async :meth:`execute`."""
+        return await asyncio.to_thread(self.execute, operation)
+
+    async def acurrent_state(self, action: Action) -> dict[str, Any] | None:
+        """Async :meth:`current_state`."""
+        return await asyncio.to_thread(self.current_state, action)
+
+    async def acheck_conflict(self, action: Action) -> list[ConflictDetail]:
+        """Async :meth:`check_conflict`."""
+        return await asyncio.to_thread(self.check_conflict, action)
+
+    async def aexecute_rollback(self, action: Action) -> None:
+        """Async :meth:`execute_rollback`."""
+        await asyncio.to_thread(self.execute_rollback, action)
+
+    async def aexecute_rollback_plan(self, action: Action) -> None:
+        """Run each step of an action's plan through :meth:`aexecute`."""
+        plan = action.rollback_plan
+        if plan is None:
+            raise IntegrationError(f"no rollback plan on action {action.operation_id}")
+        for step in plan.steps:
+            await self.aexecute(Operation(tool=step.tool, api_call=step.api_call, args=step.args))
 
     # -- optional hooks -----------------------------------------------------
 

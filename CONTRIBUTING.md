@@ -190,6 +190,32 @@ If you skip `check_conflict`, the base class compares the whole of `state_after`
         self.execute_rollback_plan(action)  # runs each step through execute()
 ```
 
+### 6b. Async (optional)
+
+If your SDK is synchronous — most are — **you are already done**. Every async
+hook defaults to running its blocking twin in a worker thread, so your
+integration works under `await` without another line of code.
+
+If your SDK is async, override the hooks that touch the network:
+
+```python
+    async def asnapshot(self, operation: Operation) -> dict[str, Any] | None: ...
+    async def asnapshot_after(self, operation: Operation, result: Any) -> dict | None: ...
+    async def aexecute(self, operation: Operation) -> Any: ...
+    async def acurrent_state(self, action: Action) -> dict[str, Any] | None: ...
+    async def acheck_conflict(self, action: Action) -> list[ConflictDetail]: ...
+    async def aexecute_rollback(self, action: Action) -> None: ...
+```
+
+One trap worth naming: if you override `asnapshot`, **override
+`asnapshot_after` too**. Its default offloads the synchronous `snapshot_after`,
+which calls the synchronous `snapshot` — right for a blocking SDK, wrong for
+yours. The default cannot just delegate to `asnapshot`, because integrations
+override `snapshot_after` precisely to read new identifiers off `result`.
+
+`classify` and `build_rollback_plan` stay synchronous. Neither touches the
+network, and having one of each would be two things to keep in step for no gain.
+
 ### 7. Test it against an in-memory backend
 
 Do not mock. Write a small fake client that behaves like the real API — including its errors — the way [`controlz/integrations/memory.py`](src/controlz/integrations/memory.py) does for GitHub. It is ~140 lines and it caught real bugs that mocks would have hidden.

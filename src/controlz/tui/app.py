@@ -303,7 +303,7 @@ class ControlZApp(App[None]):
         entries: list[RollbackEntry] = []
         try:
             for action in actions:
-                entry = await asyncio.to_thread(engine.rollback_action, action)
+                entry = await engine.arollback_action(action)
                 entries.append(entry)
                 self._entries[entry.operation_id] = entry
                 self.feed.mark(entry)

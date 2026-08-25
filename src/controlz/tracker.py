@@ -14,6 +14,7 @@ plan, and writes a complete :class:`~controlz.models.Action` to the ledger.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -21,7 +22,7 @@ from typing import Any
 from controlz.integrations import Integration, UnsupportedOperationError
 from controlz.ledger import Ledger
 from controlz.models import Action, Operation, Reversibility
-from controlz.policy import Policy, PolicyDecision, PolicyGate
+from controlz.policy import Policy, PolicyDecision, PolicyGate, PolicyViolation
 from controlz.rollback import RollbackEngine, RollbackReport
 
 __all__ = ["ToolProxy", "TrackedCall", "Tracker", "TrackingError"]
@@ -143,6 +144,23 @@ class Tracker:
 
         state_after = self._snapshot_after(integration, operation, result)
 
+        action = self._build_action(integration, operation, state_before, state_after, dependencies)
+        self.ledger.append(action)
+        return TrackedCall(action=action, result=result)
+
+    def _build_action(
+        self,
+        integration: Integration,
+        operation: Operation,
+        state_before: dict[str, Any] | None,
+        state_after: dict[str, Any] | None,
+        dependencies: list[str] | None,
+    ) -> Action:
+        """Classify, plan, and assemble the ledger entry.
+
+        Pure computation over state already in hand — no I/O — so the sync and
+        async paths share it rather than keeping two copies in step.
+        """
         action = Action(
             session_id=self.ledger.session.session_id,
             tool=operation.tool,
@@ -169,9 +187,81 @@ class Tracker:
                     }
                 )
             action.rollback_plan = plan
+        return action
 
-        self.ledger.append(action)
+    def _prepare(self, operation: Operation, intent: str | None) -> tuple[Integration, Operation]:
+        """Resolve the integration and refuse anything it does not support."""
+        integration = self.integration_for(operation.tool)
+        if intent is not None:
+            operation = operation.model_copy(update={"intent": intent})
+        if not integration.supports(operation.api_call):
+            raise UnsupportedOperationError(
+                f"{operation.tool!r} does not support {operation.api_call!r}; "
+                f"supported: {', '.join(integration.supported_operations())}"
+            )
+        return integration, operation
+
+    # -- the async wrapper --------------------------------------------------
+
+    async def acall(self, tool: str, api_call: str, _intent: str | None = None, **args: Any) -> Any:
+        """Async :meth:`call`."""
+        operation = Operation(tool=tool, api_call=api_call, args=args, intent=_intent)
+        return (await self.atrack(operation)).result
+
+    async def atrack(
+        self,
+        operation: Operation,
+        *,
+        intent: str | None = None,
+        dependencies: list[str] | None = None,
+    ) -> TrackedCall:
+        """Async :meth:`track`.
+
+        Identical in behaviour, including recording a failed call as ``UNKNOWN``
+        before re-raising. Only the three steps that touch the outside world —
+        both snapshots and the call itself — are awaited; classification,
+        planning, and the append happen on the event loop, where no other
+        coroutine can interleave with them.
+        """
+        integration, operation = self._prepare(operation, intent)
+        await self.aenforce_policy([operation], scope="call")
+
+        state_before = await self._asnapshot(integration, operation)
+
+        try:
+            result = await integration.aexecute(operation)
+        except Exception:
+            # A call that raised may still have partially landed, so it is
+            # recorded before the exception continues on its way.
+            await self.ledger.aappend(self._failed_action(operation, state_before, dependencies))
+            raise
+
+        state_after = await self._asnapshot_after(integration, operation, result)
+
+        action = self._build_action(integration, operation, state_before, state_after, dependencies)
+        await self.ledger.aappend(action)
         return TrackedCall(action=action, result=result)
+
+    async def _asnapshot(
+        self, integration: Integration, operation: Operation
+    ) -> dict[str, Any] | None:
+        try:
+            return await integration.asnapshot(operation)
+        except Exception as exc:
+            if self.snapshot_errors == "raise":
+                raise TrackingError(
+                    f"could not snapshot before {operation.api_call!r}: {exc}"
+                ) from exc
+            return {"error": f"snapshot failed: {exc}"}
+
+    async def _asnapshot_after(
+        self, integration: Integration, operation: Operation, result: Any
+    ) -> dict[str, Any] | None:
+        try:
+            return await integration.asnapshot_after(operation, result)
+        except Exception as exc:
+            # The call already succeeded; losing the after-state must not undo that.
+            return {"error": f"snapshot failed: {exc}"}
 
     def _snapshot(self, integration: Integration, operation: Operation) -> dict[str, Any] | None:
         try:
@@ -204,7 +294,15 @@ class Tracker:
         Classified UNKNOWN on purpose: a failed call may still have changed
         something, so it needs a human to look rather than an automatic undo.
         """
-        action = Action(
+        return self.ledger.append(self._failed_action(operation, state_before, dependencies))
+
+    def _failed_action(
+        self,
+        operation: Operation,
+        state_before: dict[str, Any] | None,
+        dependencies: list[str] | None,
+    ) -> Action:
+        return Action(
             session_id=self.ledger.session.session_id,
             tool=operation.tool,
             api_call=operation.api_call,
@@ -215,7 +313,6 @@ class Tracker:
             reversibility=Reversibility.UNKNOWN,
             dependencies=dependencies or [],
         )
-        return self.ledger.append(action)
 
     # -- reading back -------------------------------------------------------
 
@@ -263,6 +360,33 @@ class Tracker:
             operations, approve=self.approve
         )
 
+    async def aenforce_policy(
+        self, operations: Iterable[Operation], *, scope: str = "task"
+    ) -> PolicyDecision | None:
+        """Async :meth:`enforce_policy`.
+
+        Scoring and rule evaluation are pure computation, so they run here. The
+        one thing that may genuinely need to await is the approver — asking a
+        human usually means a network round trip — so an ``approve`` callback
+        returning an awaitable is awaited.
+        """
+        if self.policy is None:
+            return None
+        policy = self.policy.for_single_call() if scope == "call" else self.policy
+        gate = PolicyGate(policy, list(self._integrations.values()))
+        decision = gate.check(operations)
+        if decision.blocked:
+            raise PolicyViolation(decision)
+        if decision.needs_approval:
+            approved = False
+            if self.approve is not None:
+                approved = self.approve(decision)
+                if inspect.isawaitable(approved):
+                    approved = await approved
+            if not approved:
+                raise PolicyViolation(decision)
+        return decision
+
     # -- undo ---------------------------------------------------------------
 
     @property
@@ -283,6 +407,14 @@ class Tracker:
         Takes the same arguments as :meth:`RollbackEngine.run`.
         """
         return self.engine.run(**kwargs)
+
+    async def arollback_action(self, action: Action, *, force: bool = False, **kwargs: Any):
+        """Async :meth:`rollback_action`."""
+        return await self.engine.arollback_action(action, force=force, **kwargs)
+
+    async def arollback(self, **kwargs: Any) -> RollbackReport:
+        """Async :meth:`rollback`."""
+        return await self.engine.arun(**kwargs)
 
 
 class ToolProxy:

@@ -21,6 +21,7 @@ rollback plan ran without error — nothing else claims it.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from enum import Enum
@@ -324,6 +325,91 @@ class RollbackEngine:
 
     # -- one action ---------------------------------------------------------
 
+    def _precheck(self, action: Action) -> tuple[RollbackEntry, Integration | None]:
+        """Build the entry and decide whether a rollback is even possible.
+
+        Returns the entry, plus the integration to use — or ``None`` when the
+        entry is already final and nothing should be attempted. Shared by the
+        sync and async paths so their honesty rules cannot drift apart.
+        """
+        entry = RollbackEntry(
+            operation_id=action.operation_id,
+            tool=action.tool,
+            api_call=action.api_call,
+            outcome=RollbackOutcome.SKIPPED,
+            reversibility=action.reversibility,
+            strategy=action.rollback_plan.strategy if action.rollback_plan else None,
+        )
+
+        integration = self.integrations.get(action.tool)
+        if integration is None:
+            entry.outcome = RollbackOutcome.SKIPPED
+            entry.reason = f"no integration registered for {action.tool!r}"
+            return entry, None
+
+        # 1. Is it undoable at all? Irreversible actions are reported, never dropped.
+        if action.reversibility is Reversibility.IRREVERSIBLE:
+            entry.reason = "classified irreversible — nothing can undo it"
+            return entry, None
+        if action.reversibility is Reversibility.UNKNOWN:
+            entry.reason = (
+                "classified unknown — treated as potentially irreversible until classified"
+            )
+            return entry, None
+
+        plan = action.rollback_plan
+        if plan is None:
+            entry.reason = "no rollback plan was recorded for this action"
+            return entry, None
+        if not plan.is_executable:
+            entry.outcome = RollbackOutcome.NOTHING_TO_DO
+            entry.reason = f"the action changed nothing (strategy {plan.strategy!r})"
+            return entry, None
+
+        return entry, integration
+
+    def _apply_conflicts(
+        self,
+        entry: RollbackEntry,
+        conflicts: list[ConflictDetail],
+        *,
+        force: bool,
+    ) -> bool:
+        """Record any drift on the entry. Returns True if the rollback may proceed."""
+        if conflicts:
+            entry.conflicts = conflicts
+            if not force:
+                entry.outcome = RollbackOutcome.CONFLICT
+                entry.reason = "live state no longer matches the ledger: " + "; ".join(
+                    detail.describe() for detail in conflicts
+                )
+                return False
+            entry.reason = "conflicts overridden by explicit confirmation: " + "; ".join(
+                detail.describe() for detail in conflicts
+            )
+        return True
+
+    @staticmethod
+    def _planned(entry: RollbackEntry, action: Action) -> RollbackEntry:
+        entry.outcome = RollbackOutcome.PLANNED
+        strategy = action.rollback_plan.strategy if action.rollback_plan else ""
+        entry.reason = entry.reason or f"would run {strategy!r}"
+        return entry
+
+    @staticmethod
+    def _failed(entry: RollbackEntry, exc: BaseException) -> RollbackEntry:
+        entry.outcome = RollbackOutcome.FAILED
+        entry.error = f"{type(exc).__name__}: {exc}"
+        entry.reason = f"rollback raised {type(exc).__name__}: {exc}"
+        return entry
+
+    @staticmethod
+    def _restored(entry: RollbackEntry, action: Action) -> RollbackEntry:
+        entry.outcome = RollbackOutcome.RESTORED
+        strategy = action.rollback_plan.strategy if action.rollback_plan else ""
+        entry.reason = entry.reason or f"ran {strategy!r}"
+        return entry
+
     def rollback_action(
         self,
         action: Action,
@@ -339,72 +425,61 @@ class RollbackEngine:
                 conflicted action is never overwritten.
             dry_run: Check everything, change nothing.
         """
-        entry = RollbackEntry(
-            operation_id=action.operation_id,
-            tool=action.tool,
-            api_call=action.api_call,
-            outcome=RollbackOutcome.SKIPPED,
-            reversibility=action.reversibility,
-            strategy=action.rollback_plan.strategy if action.rollback_plan else None,
-        )
-
-        integration = self.integrations.get(action.tool)
+        entry, integration = self._precheck(action)
         if integration is None:
-            entry.outcome = RollbackOutcome.SKIPPED
-            entry.reason = f"no integration registered for {action.tool!r}"
-            return entry
-
-        # 1. Is it undoable at all? Irreversible actions are reported, never dropped.
-        if action.reversibility is Reversibility.IRREVERSIBLE:
-            entry.reason = "classified irreversible — nothing can undo it"
-            return entry
-        if action.reversibility is Reversibility.UNKNOWN:
-            entry.reason = (
-                "classified unknown — treated as potentially irreversible until classified"
-            )
-            return entry
-
-        plan = action.rollback_plan
-        if plan is None:
-            entry.reason = "no rollback plan was recorded for this action"
-            return entry
-        if not plan.is_executable:
-            entry.outcome = RollbackOutcome.NOTHING_TO_DO
-            entry.reason = f"the action changed nothing (strategy {plan.strategy!r})"
             return entry
 
         # 2. Has the world moved on? Never overwrite a surprise.
-        conflicts = integration.check_conflict(action)
-        if conflicts:
-            entry.conflicts = conflicts
-            if not force:
-                entry.outcome = RollbackOutcome.CONFLICT
-                entry.reason = "live state no longer matches the ledger: " + "; ".join(
-                    detail.describe() for detail in conflicts
-                )
-                return entry
-            entry.reason = "conflicts overridden by explicit confirmation: " + "; ".join(
-                detail.describe() for detail in conflicts
-            )
+        if not self._apply_conflicts(entry, integration.check_conflict(action), force=force):
+            return entry
 
         if dry_run:
-            entry.outcome = RollbackOutcome.PLANNED
-            entry.reason = entry.reason or f"would run {plan.strategy!r}"
-            return entry
+            return self._planned(entry, action)
 
         # 3. Do it.
         try:
             integration.execute_rollback(action)
         except Exception as exc:
-            entry.outcome = RollbackOutcome.FAILED
-            entry.error = f"{type(exc).__name__}: {exc}"
-            entry.reason = f"rollback raised {type(exc).__name__}: {exc}"
-            return entry
+            return self._failed(entry, exc)
 
-        entry.outcome = RollbackOutcome.RESTORED
-        entry.reason = entry.reason or f"ran {plan.strategy!r}"
+        self._restored(entry, action)
         try:
             entry.state_after_rollback = integration.current_state(action)
+        except Exception:  # pragma: no cover - the rollback itself already succeeded
+            entry.state_after_rollback = None
+        return entry
+
+    async def arollback_action(
+        self,
+        action: Action,
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> RollbackEntry:
+        """Async :meth:`rollback_action`.
+
+        The conflict check and the undo itself are awaited; the decisions
+        between them are pure computation and stay on the loop.
+        """
+        entry, integration = self._precheck(action)
+        if integration is None:
+            return entry
+
+        conflicts = await integration.acheck_conflict(action)
+        if not self._apply_conflicts(entry, conflicts, force=force):
+            return entry
+
+        if dry_run:
+            return self._planned(entry, action)
+
+        try:
+            await integration.aexecute_rollback(action)
+        except Exception as exc:
+            return self._failed(entry, exc)
+
+        self._restored(entry, action)
+        try:
+            entry.state_after_rollback = await integration.acurrent_state(action)
         except Exception:  # pragma: no cover - the rollback itself already succeeded
             entry.state_after_rollback = None
         return entry
@@ -485,6 +560,88 @@ class RollbackEngine:
                 and on_conflict(action, entry.conflicts)
             ):
                 entry = self.rollback_action(action, force=True, dry_run=dry_run)
+
+            report.entries.append(entry)
+            if entry.outcome is not RollbackOutcome.RESTORED and entry.outcome not in (
+                RollbackOutcome.NOTHING_TO_DO,
+                RollbackOutcome.PLANNED,
+            ):
+                unresolved.add(action.operation_id)
+            if entry.outcome is RollbackOutcome.FAILED and stop_on_error:
+                halted = True
+
+        report.finished_at = utcnow()
+        return report
+
+    async def arun(
+        self,
+        *,
+        on_conflict: Callable[[Action, list[ConflictDetail]], Any] | None = None,
+        force: Sequence[str] | bool = (),
+        dry_run: bool = False,
+        stop_on_error: bool = False,
+    ) -> RollbackReport:
+        """Async :meth:`run`.
+
+        Actions are unwound one at a time, in order — deliberately not
+        concurrently. A rollback is a sequence of causally related undos, and
+        the ordering guarantees are the point; the async version exists to keep
+        the event loop free while waiting on the network, not to parallelise.
+
+        ``on_conflict`` may return an awaitable, so an interactive confirmation
+        can go and ask someone.
+        """
+        report = RollbackReport(session_id=self.session.session_id, dry_run=dry_run)
+        ordered, cycles = dependency_order(self.session)
+        force_all = force is True
+        force_ids = set() if isinstance(force, bool) else set(force)
+
+        unresolved: set[str] = set()
+        halted = False
+
+        for action in ordered:
+            if halted:
+                report.entries.append(
+                    self._trivial_entry(
+                        action,
+                        RollbackOutcome.NOT_ATTEMPTED,
+                        "the run stopped at an earlier failure",
+                    )
+                )
+                continue
+
+            if action.operation_id in cycles:
+                report.entries.append(
+                    self._trivial_entry(
+                        action,
+                        RollbackOutcome.FAILED,
+                        "caught in a dependency cycle; cannot determine a safe order",
+                    )
+                )
+                unresolved.add(action.operation_id)
+                continue
+
+            blocker = self._blocking_dependent(action, unresolved)
+            if blocker is not None:
+                report.entries.append(
+                    self._trivial_entry(
+                        action,
+                        RollbackOutcome.BLOCKED,
+                        f"{blocker.api_call} depends on this action and was not rolled back",
+                    )
+                )
+                unresolved.add(action.operation_id)
+                continue
+
+            confirmed = force_all or action.operation_id in force_ids
+            entry = await self.arollback_action(action, force=confirmed, dry_run=dry_run)
+
+            if entry.outcome is RollbackOutcome.CONFLICT and on_conflict is not None:
+                allowed = on_conflict(action, entry.conflicts)
+                if inspect.isawaitable(allowed):
+                    allowed = await allowed
+                if allowed:
+                    entry = await self.arollback_action(action, force=True, dry_run=dry_run)
 
             report.entries.append(entry)
             if entry.outcome is not RollbackOutcome.RESTORED and entry.outcome not in (

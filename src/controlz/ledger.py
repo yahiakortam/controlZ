@@ -7,6 +7,7 @@ good file in place rather than a truncated one.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -73,19 +74,29 @@ class Ledger:
             "session": self.session.model_dump(mode="json"),
         }
 
-    def save(self, path: str | os.PathLike[str] | None = None) -> Path:
-        """Write the session to ``path`` (or the ledger's own path) as JSON.
-
-        The write goes to a temporary file in the same directory and is then
-        renamed over the target, so readers never observe a partial file.
-        Returns the path written.
-        """
+    def _target_for(self, path: str | os.PathLike[str] | None) -> Path:
         target = Path(path) if path is not None else self.path
         if target is None:
             raise ValueError("no path given and this ledger has no default path")
-        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
 
-        payload = json.dumps(self.to_dict(), indent=2, sort_keys=False)
+    def _payload(self) -> str:
+        """Serialize the session to JSON text.
+
+        Kept separate from the write so the async path can serialize on the
+        event loop — where no other coroutine can mutate the action list
+        mid-dump — and only hand the finished bytes to a worker thread.
+        """
+        return json.dumps(self.to_dict(), indent=2, sort_keys=False)
+
+    @staticmethod
+    def _write(target: Path, payload: str) -> None:
+        """Write ``payload`` to ``target`` atomically.
+
+        The write goes to a temporary file in the same directory and is then
+        renamed over the target, so readers never observe a partial file.
+        """
+        target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -98,9 +109,47 @@ class Ledger:
             Path(tmp_name).unlink(missing_ok=True)
             raise
 
+    def save(self, path: str | os.PathLike[str] | None = None) -> Path:
+        """Write the session to ``path`` (or the ledger's own path) as JSON.
+
+        Atomic: a crash mid-write leaves the previous good file in place.
+        Returns the path written.
+        """
+        target = self._target_for(path)
+        self._write(target, self._payload())
         if path is not None:
             self.path = target
         return target
+
+    async def asave(self, path: str | os.PathLike[str] | None = None) -> Path:
+        """Write the session without blocking the event loop.
+
+        The JSON is built here, on the loop, and only the file write is handed
+        to a thread — so a concurrent ``atrack`` cannot append to the action
+        list while it is being serialized.
+        """
+        target = self._target_for(path)
+        payload = self._payload()
+        await asyncio.to_thread(self._write, target, payload)
+        if path is not None:
+            self.path = target
+        return target
+
+    async def aappend(self, action: Action) -> Action:
+        """Append an action, persisting without blocking the loop if autosaving."""
+        self.session.append(action)
+        if self.autosave:
+            await self.asave()
+        return action
+
+    async def arecord(self, **kwargs: Any) -> Action:
+        """Build an action for this session from keyword arguments and append it."""
+        return await self.aappend(Action(session_id=self.session.session_id, **kwargs))
+
+    @classmethod
+    async def aload(cls, path: str | os.PathLike[str], *, autosave: bool = False) -> Ledger:
+        """Read a ledger back from disk without blocking the event loop."""
+        return await asyncio.to_thread(cls.load, path, autosave=autosave)
 
     @classmethod
     def load(cls, path: str | os.PathLike[str], *, autosave: bool = False) -> Ledger:

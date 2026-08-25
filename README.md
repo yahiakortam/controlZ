@@ -139,6 +139,56 @@ Three rules govern a rollback:
 - **Never overwrite a surprise.** The live state is re-read and compared before restoring anything. If someone else edited the field being restored, the action is marked `CONFLICT` and left alone until a human confirms. If the state cannot be read at all, that counts as drift too — an unreadable target is not a green light.
 - **Say what happened.** Every action appears in the report exactly once. `report.complete` means nothing is left to act on; `report.fully_restored` means everything actually came back. A session with one irreversible action is the first but not the second, and blurring those together is the dishonesty this whole layer exists to prevent.
 
+## Async
+
+Agent frameworks are async, so ControlZ is too. Every method that touches the
+network has an awaitable twin, named the way LangChain names them:
+
+```python
+tracker = Tracker(ledger, [github])
+
+await tracker.acall("github", "create_issue", repo="acme/widgets", title="Broken build")
+report = await tracker.arollback()
+```
+
+`atrack`, `acall`, `arollback`, `arollback_action`, `session.arollback()`,
+`ledger.asave()`, `ledger.aload()`. Behaviour is identical to the sync path —
+same classifications, same conflict refusals, same honest report. A parity test
+runs the same mess through both and asserts the actions and reports match.
+
+**Existing integrations work unchanged.** Each async hook defaults to running
+its blocking twin in a worker thread, which is the correct thing to do for the
+many SDKs that are synchronous — PyGithub among them. The event loop stays free:
+
+```python
+# four calls to a blocking SDK, overlapped rather than serialized
+await asyncio.gather(*(tracker.acall("github", "close_issue", ...) for ... ))
+```
+
+An integration built on an async client overrides `asnapshot`, `aexecute`,
+`acheck_conflict`, and `aexecute_rollback` to await for real. `classify` and
+`build_rollback_plan` have no async twins on purpose — one is a dictionary
+lookup, the other is pure computation over state already in hand.
+
+Approval callbacks may be async, which matters because asking a human usually
+means a network round trip:
+
+```python
+async def approve(decision):
+    return await ask_in_slack(decision.summary())
+
+tracker = Tracker(ledger, [github], policy=policy, approve=approve)
+```
+
+Two deliberate choices worth knowing:
+
+- **Rollback is sequential, not concurrent.** A rollback is a chain of causally
+  related undos and the ordering guarantees are the whole point. Async keeps the
+  loop free while waiting on the network; it does not parallelise the unwind.
+- **Appends happen on the loop.** Serialization for a save is done on the loop
+  and only the file write goes to a thread, so concurrent `atrack` calls cannot
+  lose an action or serialize a list mid-mutation.
+
 ## The watch window
 
 ```bash

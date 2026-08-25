@@ -267,5 +267,13 @@ class Session(_Base):
         block = kwargs.pop("block_dependencies", True)
         return RollbackEngine(self, integrations, block_dependencies=block).run(**kwargs)
 
+    async def arollback(self, integrations: Any, **kwargs: Any) -> Any:
+        """Async :meth:`rollback`."""
+        from controlz.rollback import RollbackEngine
+
+        block = kwargs.pop("block_dependencies", True)
+        engine = RollbackEngine(self, integrations, block_dependencies=block)
+        return await engine.arun(**kwargs)
+
     def __len__(self) -> int:
         return len(self.actions)
