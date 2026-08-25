@@ -156,10 +156,10 @@ cz proxy --spec examples/mcp-github.yaml --ledger run.json \
 ```
 
 Point your agent's MCP configuration at that command instead of the server's,
-and it sees **exactly the same tools** — names, descriptions, and schemas
-forwarded verbatim, because a safety layer that changes behaviour is a
-liability. Every call it makes is recorded, classified, and gated on the way
-through.
+and it sees **exactly what it would have seen anyway** — tools, resources, and
+prompts forwarded verbatim, and only the capabilities the upstream really
+declares. A safety layer that quietly costs you capability is a liability. Every
+tool call is recorded, classified, and gated on the way through.
 
 This inverts the integration problem. A Python integration teaches ControlZ one
 API; a proxy wraps the protocol once and works with any MCP server there is.

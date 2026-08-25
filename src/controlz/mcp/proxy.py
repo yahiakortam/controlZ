@@ -1,9 +1,10 @@
 """A ControlZ proxy in front of another MCP server.
 
-The agent connects to this instead of the real server. It sees exactly the same
-tools, because the list is forwarded verbatim. Every call it makes passes
-through the policy gate and lands in the ledger on its way to the real server,
-and comes back unchanged.
+The agent connects to this instead of the real server, and sees exactly what the
+real server offers: tools, resources, and prompts all forwarded verbatim, and
+only the capabilities the upstream actually declares. Every tool call passes
+through the policy gate and lands in the ledger on its way, and comes back
+unchanged.
 
     agent ──MCP──▶ ControlZ proxy ──MCP──▶ real server
 
@@ -111,6 +112,38 @@ class ControlZProxy:
             is_error=bool(getattr(result, "is_error", False)),
         )
 
+    # -- everything else, forwarded untouched -------------------------------
+    #
+    # A proxy that quietly drops half a server is worse than no proxy: the agent
+    # loses capability it would have had, and cannot tell, because the missing
+    # capability is never advertised. None of these change anything, so there is
+    # nothing to record — they exist so that going through ControlZ costs the
+    # agent nothing.
+
+    async def list_resources(self, _ctx: Any = None, _params: Any = None) -> Any:
+        return types.ListResourcesResult(
+            resources=list((await self.session.list_resources()).resources)
+        )
+
+    async def read_resource(self, _ctx: Any, params: Any) -> Any:
+        upstream = await self.session.read_resource(params.uri)
+        return types.ReadResourceResult(contents=list(upstream.contents))
+
+    async def list_resource_templates(self, _ctx: Any = None, _params: Any = None) -> Any:
+        upstream = await self.session.list_resource_templates()
+        return types.ListResourceTemplatesResult(
+            resource_templates=list(upstream.resource_templates)
+        )
+
+    async def list_prompts(self, _ctx: Any = None, _params: Any = None) -> Any:
+        return types.ListPromptsResult(prompts=list((await self.session.list_prompts()).prompts))
+
+    async def get_prompt(self, _ctx: Any, params: Any) -> Any:
+        upstream = await self.session.get_prompt(params.name, params.arguments)
+        return types.GetPromptResult(
+            description=upstream.description, messages=list(upstream.messages)
+        )
+
     def _intent_for(self, params: types.CallToolRequestParams) -> str | None:
         """Record the agent's stated reason, when the tool takes one."""
         spec = self.spec.operations.get(params.name)
@@ -159,10 +192,42 @@ class ControlZProxy:
         The low level is the right level here: the high-level API derives tool
         schemas from Python signatures, and a proxy must pass the upstream's
         schemas through untouched.
+
+        Handlers are registered to match the upstream's own capabilities, since
+        the SDK derives what a server advertises from what it can handle.
+        Registering everything would advertise capabilities the upstream may not
+        have; registering only tools would hide ones it does.
         """
         server: LowLevelServer = LowLevelServer(self.name)
-        server.add_request_handler("tools/list", types.PaginatedRequestParams, self.list_tools)
-        server.add_request_handler("tools/call", types.CallToolRequestParams, self.call_tool)
+        capabilities = getattr(self.session, "server_capabilities", None)
+
+        def upstream_has(name: str) -> bool:
+            # Nothing to inspect — a bare session, or a test double — means
+            # assume tools only, which is what every server has.
+            if capabilities is None:
+                return name == "tools"
+            return getattr(capabilities, name, None) is not None
+
+        if upstream_has("tools"):
+            server.add_request_handler("tools/list", types.PaginatedRequestParams, self.list_tools)
+            server.add_request_handler("tools/call", types.CallToolRequestParams, self.call_tool)
+        if upstream_has("resources"):
+            server.add_request_handler(
+                "resources/list", types.PaginatedRequestParams, self.list_resources
+            )
+            server.add_request_handler(
+                "resources/read", types.ReadResourceRequestParams, self.read_resource
+            )
+            server.add_request_handler(
+                "resources/templates/list",
+                types.PaginatedRequestParams,
+                self.list_resource_templates,
+            )
+        if upstream_has("prompts"):
+            server.add_request_handler(
+                "prompts/list", types.PaginatedRequestParams, self.list_prompts
+            )
+            server.add_request_handler("prompts/get", types.GetPromptRequestParams, self.get_prompt)
         return server
 
     async def serve_stdio(self) -> None:

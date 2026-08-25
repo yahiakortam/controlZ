@@ -926,3 +926,112 @@ class TestShippedFilesystemSpec:
             )
             if needs_before:
                 assert operation.read is not None, f"{name} needs prior state it cannot read"
+
+
+@pytest.fixture
+def rich_upstream(world):
+    """A server with resources and prompts as well as tools."""
+    server = MCPServer("docs")
+
+    @server.tool()
+    def create_note(title: str) -> str:
+        """Create a note."""
+        nid = world.next_id
+        world.next_id += 1
+        world.notes[nid] = {"id": nid, "title": title}
+        return json.dumps(world.notes[nid])
+
+    @server.resource("docs://handbook")
+    def handbook() -> str:
+        """The handbook."""
+        return "be excellent to each other"
+
+    @server.prompt()
+    def summarize(text: str) -> str:
+        """Summarize some text."""
+        return f"Summarize this: {text}"
+
+    return server
+
+
+class TestTransparency:
+    """Going through the proxy must cost the agent nothing.
+
+    A proxy that quietly drops half a server is worse than no proxy: the agent
+    loses capability it would have had and cannot tell, because the missing
+    capability is never advertised.
+    """
+
+    async def test_resources_are_forwarded(self, rich_upstream):
+        client, proxy = await proxied(rich_upstream, spec=ServerSpec.unconfigured("docs"))
+        try:
+            direct = await proxy.session.list_resources()
+            through = await proxy.list_resources()
+            assert [str(r.uri) for r in through.resources] == [str(r.uri) for r in direct.resources]
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_a_resource_can_be_read_through_the_proxy(self, rich_upstream):
+        client, proxy = await proxied(rich_upstream, spec=ServerSpec.unconfigured("docs"))
+        try:
+            params = types.ReadResourceRequestParams(uri="docs://handbook")
+            result = await proxy.read_resource(None, params)
+            assert "be excellent" in result.contents[0].text
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_prompts_are_forwarded(self, rich_upstream):
+        client, proxy = await proxied(rich_upstream, spec=ServerSpec.unconfigured("docs"))
+        try:
+            direct = await proxy.session.list_prompts()
+            through = await proxy.list_prompts()
+            assert [p.name for p in through.prompts] == [p.name for p in direct.prompts]
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_a_prompt_can_be_fetched_through_the_proxy(self, rich_upstream):
+        client, proxy = await proxied(rich_upstream, spec=ServerSpec.unconfigured("docs"))
+        try:
+            params = types.GetPromptRequestParams(name="summarize", arguments={"text": "hello"})
+            result = await proxy.get_prompt(None, params)
+            assert "Summarize this: hello" in result.messages[0].content.text
+        finally:
+            await client.__aexit__(None, None, None)
+
+    async def test_the_proxy_advertises_what_the_upstream_has(self, rich_upstream):
+        client, proxy = await proxied(rich_upstream, spec=ServerSpec.unconfigured("docs"))
+        try:
+            capabilities = proxy.build_server().get_capabilities()
+            assert capabilities.tools is not None
+            assert capabilities.resources is not None
+            assert capabilities.prompts is not None
+        finally:
+            await client.__aexit__(None, None, None)
+
+    def test_it_does_not_advertise_what_the_upstream_lacks(self):
+        """A tools-only upstream must not be dressed up as more than it is.
+
+        (Servers built with the SDK's MCPServer advertise every capability even
+        when empty, so this uses a session that declares only tools.)
+        """
+        from mcp.types import ServerCapabilities, ToolsCapability
+
+        class ToolsOnly:
+            server_capabilities = ServerCapabilities(tools=ToolsCapability())
+
+        server = ControlZProxy(session=ToolsOnly(), spec=SPEC).build_server()
+
+        assert server.get_request_handler("tools/call") is not None
+        assert server.get_request_handler("resources/list") is None
+        assert server.get_request_handler("prompts/list") is None
+
+        capabilities = server.get_capabilities()
+        assert capabilities.resources is None
+        assert capabilities.prompts is None
+
+    def test_a_session_without_capabilities_still_serves_tools(self):
+        """A bare session or test double falls back to tools, which all servers have."""
+        proxy = ControlZProxy(session=None, spec=SPEC)
+        server = proxy.build_server()
+        assert server.get_request_handler("tools/call") is not None
+        assert server.get_request_handler("resources/list") is None
